@@ -555,6 +555,9 @@ impl MembershipTable {
         signer: &impl ClaimSigner,
         now: SimInstant,
     ) -> Result<ApplyOutcome, CoreError> {
+        if self.can_skip_alert(alert, true) {
+            return Ok(ApplyOutcome::default());
+        }
         alert.verify(verifier)?;
         self.lamport_clock = self.lamport_clock.max(alert.payload.join_seq);
         let outcome = self.apply_verified_alert(alert, signer, now)?;
@@ -617,16 +620,7 @@ impl MembershipTable {
         }
 
         for alert in &snapshot.indirect_alerts {
-            if self.is_below_reaped_high_water(
-                alert.payload.subject,
-                alert.payload.join_seq,
-                alert.payload.incarnation,
-            ) {
-                continue;
-            }
-            if let Some(existing) = self.entries.get(&alert.payload.subject)
-                && existing.state.alert.as_ref() == Some(alert)
-            {
+            if self.can_skip_alert(alert, false) {
                 continue;
             }
             alert.verify(verifier)?;
@@ -866,6 +860,49 @@ impl MembershipTable {
         self.reaped_high_water
             .get(&peer_id)
             .is_some_and(|&(hw_seq, hw_inc)| (join_seq, incarnation) <= (hw_seq, hw_inc))
+    }
+
+    fn can_skip_alert(
+        &self,
+        alert: &SignedIndirectAlert,
+        allow_suspect_corroboration: bool,
+    ) -> bool {
+        let p = &alert.payload;
+        if self.is_below_reaped_high_water(p.subject, p.join_seq, p.incarnation) {
+            return true;
+        }
+        if p.subject == self.local_id && p.session_id == self.local_session_id {
+            return self.entries.get(&self.local_id).is_none_or(|local| {
+                local.state.claim.claim.status == MemberStatus::Left
+                    || p.incarnation < local.state.effective_incarnation
+            });
+        }
+        let Some(existing) = self.entries.get(&p.subject) else {
+            return true;
+        };
+        if !alert_applies_to_claim(alert, &existing.state.claim) {
+            return true;
+        }
+        if let Some(prev) = &existing.state.alert {
+            if prev == alert {
+                return true;
+            }
+            if prev.payload.incarnation > p.incarnation {
+                return true;
+            }
+            if prev.payload.incarnation == p.incarnation && prev.payload.kind == IndirectKind::Dead
+            {
+                return true;
+            }
+            if alert_rank(alert) <= alert_rank(prev)
+                && (!allow_suspect_corroboration
+                    || p.kind != IndirectKind::Suspect
+                    || existing.state.effective_status != MemberStatus::Suspect)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn apply_claim_internal(

@@ -2092,8 +2092,15 @@ name = "membermesh-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "clap",
+ "iroh",
+ "iroh-gossip",
  "membermesh",
+ "membermesh-core",
+ "postcard",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

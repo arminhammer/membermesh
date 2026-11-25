@@ -36,14 +36,20 @@ impl fmt::Display for WatchdogTimeout {
 
 impl std::error::Error for WatchdogTimeout {}
 
-/// Returns the BDD scenario watchdog limit from `BDD_SCENARIO_TIMEOUT_SECS` (default 30s).
+/// Returns the BDD scenario watchdog limit from `BDD_SCENARIO_TIMEOUT_SECS`
+/// (defaults to 90s when `BDD_SLOW=1`, otherwise 30s).
 #[must_use]
 pub fn scenario_timeout_from_env() -> Duration {
+    let default_secs = if std::env::var("BDD_SLOW").is_ok_and(|v| v == "1") {
+        90
+    } else {
+        30
+    };
     let secs = std::env::var("BDD_SCENARIO_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|&val| val > 0)
-        .unwrap_or(30);
+        .unwrap_or(default_secs);
     Duration::from_secs(secs)
 }
 

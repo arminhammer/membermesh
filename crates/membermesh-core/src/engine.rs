@@ -589,6 +589,8 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                 else {
                     return false;
                 };
+                let transitioned = !outcome.events.is_empty();
+                let refuted = outcome.refutation.is_some();
                 for ev in outcome.events {
                     actions.push(EngineAction::EmitEvent(ev));
                 }
@@ -596,11 +598,12 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                     self.lha.increment();
                     self.queue.push(GossipItem::Claim(refute));
                 }
-                self.reconcile_suspicion_after_alert(now, subject, reporter, kind);
-                if outcome.changed {
+                let confirmed_new =
+                    self.reconcile_suspicion_after_alert(now, subject, reporter, kind);
+                if transitioned || confirmed_new {
                     self.queue.push(GossipItem::IndirectAlert(alert));
                 }
-                outcome.changed
+                transitioned || confirmed_new || refuted
             }
         }
     }
@@ -732,10 +735,11 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
             self.table
                 .apply_indirect_alert(&alert, &self.verifier, &self.signer, now)
         {
+            let transitioned = !outcome.events.is_empty();
             for ev in outcome.events {
                 actions.push(EngineAction::EmitEvent(ev));
             }
-            if outcome.changed {
+            if transitioned {
                 self.queue.push(GossipItem::IndirectAlert(alert));
                 self.flush_gossip(actions, 1);
             }
@@ -769,10 +773,11 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
             self.table
                 .apply_indirect_alert(&alert, &self.verifier, &self.signer, now)
         {
+            let transitioned = !outcome.events.is_empty();
             for ev in outcome.events {
                 actions.push(EngineAction::EmitEvent(ev));
             }
-            if outcome.changed {
+            if transitioned {
                 self.queue.push(GossipItem::IndirectAlert(alert));
                 self.flush_gossip(actions, 1);
             }
@@ -785,13 +790,13 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
         subject: PeerId,
         reporter: PeerId,
         kind: IndirectKind,
-    ) {
+    ) -> bool {
         if subject == self.table.local_id() {
-            return;
+            return false;
         }
         let Some(view) = self.table.member(subject) else {
             self.suspicions.remove(&subject);
-            return;
+            return false;
         };
         match (kind, view.status) {
             (IndirectKind::Suspect, MemberStatus::Suspect) => {
@@ -799,14 +804,17 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                     .suspicions
                     .entry(subject)
                     .or_insert_with(|| ActiveSuspicion::new(subject, now, &self.config, self.lha));
-                if reporter != self.table.local_id() {
-                    let _ = susp.add_confirmation(reporter, &self.config, self.lha);
+                if reporter == self.table.local_id() {
+                    false
+                } else {
+                    susp.add_confirmation(reporter, &self.config, self.lha)
                 }
             }
             (_, MemberStatus::Dead | MemberStatus::Left | MemberStatus::Alive) => {
                 self.suspicions.remove(&subject);
+                false
             }
-            (IndirectKind::Dead, MemberStatus::Suspect) => {}
+            (IndirectKind::Dead, MemberStatus::Suspect) => false,
         }
     }
 

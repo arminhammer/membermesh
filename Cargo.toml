@@ -46,6 +46,7 @@ large_enum_variant = "deny"
 anyhow = "1.0"
 blake3 = "1.8"
 bytes = { version = "1.10", features = ["serde"] }
+clap = { version = "4.6", features = ["derive"] }
 cucumber = "0.23"
 ed25519-dalek = "3.0"
 iroh = "1.5"
@@ -62,3 +63,4 @@ stateright = "0.31"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -277,6 +277,16 @@ impl LocalIrohCluster {
         self.matrix.heal_all();
     }
 
+    /// Shuts down and removes a single node by `name`, freeing its sockets before restart.
+    pub async fn remove_and_close(&mut self, name: &str) {
+        if let Some(node) = self.nodes.remove(name) {
+            if let Some(router) = node.router {
+                let _ = router.shutdown().await;
+            }
+            node.endpoint.close().await;
+        }
+    }
+
     /// Shuts down and closes every endpoint cleanly.
     pub async fn shutdown_all(self) {
         for (_, node) in self.nodes {
