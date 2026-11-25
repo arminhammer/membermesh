@@ -142,7 +142,9 @@ impl MemberEntryState {
 
     /// Merges two verified entries for the same `PeerId` as a join-semilattice.
     ///
-    /// Guarantees commutativity, associativity, and idempotence.
+    /// Guarantees commutativity, associativity, and idempotence across all inputs
+    /// by taking independent joins on the total orders of `claim` and `alert` and
+    /// deriving `(effective_status, effective_incarnation)` deterministically.
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
         let winning_claim = if claim_rank(&other.claim) > claim_rank(&self.claim) {
@@ -151,18 +153,17 @@ impl MemberEntryState {
             self.claim.clone()
         };
 
-        let winning_alert =
-            pick_dominating_alert(&winning_claim, self.alert.as_ref(), other.alert.as_ref());
+        let winning_alert = pick_max_alert(self.alert.as_ref(), other.alert.as_ref());
 
         let (effective_status, effective_incarnation) = match &winning_alert {
-            Some(alert) => {
+            Some(alert) if alert_applies_to_claim(alert, &winning_claim) => {
                 let status = match alert.payload.kind {
                     IndirectKind::Suspect => MemberStatus::Suspect,
                     IndirectKind::Dead => MemberStatus::Dead,
                 };
                 (status, alert.payload.incarnation)
             }
-            None => (winning_claim.claim.status, winning_claim.claim.incarnation),
+            _ => (winning_claim.claim.status, winning_claim.claim.incarnation),
         };
 
         Self {
@@ -236,23 +237,22 @@ fn alert_applies_to_claim(alert: &SignedIndirectAlert, claim: &SignedClaim) -> b
         && p.incarnation >= c.incarnation
 }
 
-fn alert_rank(alert: &SignedIndirectAlert) -> (Incarnation, u8, PeerId, [u8; 64]) {
+fn alert_rank(alert: &SignedIndirectAlert) -> (u64, Incarnation, u8, SessionId, PeerId, [u8; 64]) {
     (
+        alert.payload.join_seq,
         alert.payload.incarnation,
         indirect_kind_rank(alert.payload.kind),
+        alert.payload.session_id,
         alert.payload.reporter,
         alert.signature,
     )
 }
 
-fn pick_dominating_alert(
-    claim: &SignedClaim,
+fn pick_max_alert(
     a: Option<&SignedIndirectAlert>,
     b: Option<&SignedIndirectAlert>,
 ) -> Option<SignedIndirectAlert> {
-    let a_valid = a.filter(|al| alert_applies_to_claim(al, claim));
-    let b_valid = b.filter(|al| alert_applies_to_claim(al, claim));
-    match (a_valid, b_valid) {
+    match (a, b) {
         (Some(lhs), Some(rhs)) => {
             if alert_rank(rhs) > alert_rank(lhs) {
                 Some(rhs.clone())
@@ -550,6 +550,18 @@ impl MembershipTable {
         }
 
         for alert in &snapshot.indirect_alerts {
+            if self.is_below_reaped_high_water(
+                alert.payload.subject,
+                alert.payload.join_seq,
+                alert.payload.incarnation,
+            ) {
+                continue;
+            }
+            if let Some(existing) = self.entries.get(&alert.payload.subject)
+                && existing.state.alert.as_ref() == Some(alert)
+            {
+                continue;
+            }
             alert.verify(verifier)?;
             self.lamport_clock = self.lamport_clock.max(alert.payload.join_seq);
             let step = self.apply_verified_alert(alert, signer, now)?;
@@ -705,7 +717,13 @@ impl MembershipTable {
         let indirect_alerts = self
             .entries
             .values()
-            .filter_map(|e| e.state.alert.clone())
+            .filter_map(|e| {
+                e.state
+                    .alert
+                    .as_ref()
+                    .filter(|al| alert_applies_to_claim(al, &e.state.claim))
+                    .cloned()
+            })
             .collect();
         SyncSnapshot {
             sender: self.local_id,
@@ -777,10 +795,9 @@ impl MembershipTable {
         verifier: &impl ClaimVerifier,
         now: SimInstant,
     ) -> Result<ApplyOutcome, CoreError> {
-        claim_msg.verify(verifier)?;
         let peer_id = claim_msg.claim.subject;
-        self.lamport_clock = self.lamport_clock.max(claim_msg.claim.join_seq);
-
+        // Fast path: skip expensive Ed25519 verification for identical or strictly older claims
+        // than an already-verified entry or reaped high-water mark.
         if self.is_below_reaped_high_water(
             peer_id,
             claim_msg.claim.join_seq,
@@ -788,6 +805,15 @@ impl MembershipTable {
         ) {
             return Ok(ApplyOutcome::default());
         }
+        if let Some(existing) = self.entries.get(&peer_id)
+            && (existing.state.claim == claim_msg
+                || claim_rank(&claim_msg) <= claim_rank(&existing.state.claim))
+        {
+            return Ok(ApplyOutcome::default());
+        }
+
+        claim_msg.verify(verifier)?;
+        self.lamport_clock = self.lamport_clock.max(claim_msg.claim.join_seq);
 
         let candidate = MemberEntryState::from_claim(claim_msg);
         Ok(self.merge_peer_state(peer_id, &candidate, now))

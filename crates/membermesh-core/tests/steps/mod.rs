@@ -1,4 +1,5 @@
 mod membership;
+mod swim;
 mod wire;
 
 use std::collections::BTreeMap;
@@ -6,9 +7,11 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use cucumber::{World, given, then, when};
 use membermesh_core::{CoreError, MemberClaim, MemberMetadata, MembershipTable, SignedClaim};
-use membermesh_testkit::crypto::PeerDirectory;
+use membermesh_testkit::{
+    crypto::PeerDirectory, gossip_cosim::GossipCosimCluster, sim::SimCluster,
+};
 
-#[derive(Debug, Default, World)]
+#[derive(Default, World)]
 pub struct CoreWorld {
     pub version: Option<&'static str>,
     pub peers: PeerDirectory,
@@ -23,6 +26,16 @@ pub struct CoreWorld {
     pub tables: BTreeMap<String, MembershipTable>,
     pub peer_order: Vec<String>,
     pub pending_claims: Vec<SignedClaim>,
+    pub sim_cluster: Option<SimCluster>,
+    pub cosim_cluster: Option<GossipCosimCluster>,
+}
+
+impl std::fmt::Debug for CoreWorld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreWorld")
+            .field("peer_order", &self.peer_order)
+            .finish_non_exhaustive()
+    }
 }
 
 #[given("the membermesh-core library is loaded")]

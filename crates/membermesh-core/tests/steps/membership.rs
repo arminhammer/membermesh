@@ -278,14 +278,9 @@ fn two_peers_see_roster(world: &mut CoreWorld, p1: String, p2: String, expected_
     }
 }
 
-#[then(regex = r#"^"([^"]+)" and "([^"]+)" elect "([^"]+)" as leader$"#)]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "cucumber step macro extracts String captures by value"
-)]
-fn two_peers_elect_leader(world: &mut CoreWorld, p1: String, p2: String, leader_name: String) {
-    let expected_id = world.peers.peer_id(&leader_name);
-    for name in [&p1, &p2] {
+fn check_two_table_leaders(world: &mut CoreWorld, p1: &str, p2: &str, leader_name: &str) {
+    let expected_id = world.peers.peer_id(leader_name);
+    for name in [p1, p2] {
         let leader = world
             .tables
             .get(name)
@@ -415,9 +410,13 @@ fn check_refute_and_seq(world: &mut CoreWorld, name: String, inc: u64, join_seq:
 }
 
 #[then(regex = r#"^after sync "([^"]+)" and "([^"]+)" restore "([^"]+)" as leader$"#)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "cucumber step macro extracts String captures by value"
+)]
 fn sync_restores_leader(world: &mut CoreWorld, p1: String, p2: String, leader_name: String) {
     sync_all(world, SimInstant(620));
-    two_peers_elect_leader(world, p1, p2, leader_name);
+    check_two_table_leaders(world, &p1, &p2, &leader_name);
 }
 
 #[given(regex = r#"^"([^"]+)" and "([^"]+)" independently found clusters at join sequence (\d+)$"#)]

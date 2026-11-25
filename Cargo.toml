@@ -48,12 +48,16 @@ blake3 = "1.8"
 bytes = { version = "1.10", features = ["serde"] }
 cucumber = "0.23"
 ed25519-dalek = "3.0"
+iroh-gossip = "0.103"
 membermesh = { path = "crates/membermesh", version = "0.1.0" }
 membermesh-core = { path = "crates/membermesh-core", version = "0.1.0" }
 membermesh-testkit = { path = "crates/membermesh-testkit", version = "0.1.0" }
+n0-future = "0.3"
 postcard = { version = "1.1", features = ["alloc", "use-std"] }
 proptest = "1.12"
+rand = { version = "0.10", features = ["chacha"] }
 serde = { version = "1.0", features = ["derive"] }
 stateright = "0.31"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
+tracing = "0.1"

@@ -47,19 +47,23 @@ async fn main() {
     let watchdog = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let guard = active.lock().expect("active scenario map poisoned");
-            let now = Instant::now();
-            let overdue: Vec<String> = guard
-                .iter()
-                .filter_map(|(name, started)| {
-                    let elapsed = now.duration_since(*started);
-                    (elapsed > timeout_limit).then(|| format!("{name} ({elapsed:?})"))
-                })
-                .collect();
-            assert!(
-                overdue.is_empty(),
-                "BDD hang watchdog triggered (limit {timeout_limit:?}): {overdue:?}"
-            );
+            let overdue: Vec<String> = {
+                let Ok(guard) = active.lock() else {
+                    break;
+                };
+                let now = Instant::now();
+                guard
+                    .iter()
+                    .filter_map(|(name, started)| {
+                        let elapsed = now.duration_since(*started);
+                        (elapsed > timeout_limit).then(|| format!("{name} ({elapsed:?})"))
+                    })
+                    .collect()
+            };
+            if !overdue.is_empty() {
+                eprintln!("BDD hang watchdog triggered (limit {timeout_limit:?}): {overdue:?}");
+                std::process::exit(1);
+            }
         }
     });
 
