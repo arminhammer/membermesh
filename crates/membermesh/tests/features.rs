@@ -80,8 +80,14 @@ async fn main() {
                     let mut guard = active_after.lock().expect("active scenario map poisoned");
                     guard.remove(&scenario.name);
                 }
-                let cluster = world.and_then(|w| w.cluster.take());
+                let (cluster, meshes) = match world {
+                    Some(w) => (w.cluster.take(), std::mem::take(&mut w.meshes)),
+                    None => (None, std::collections::BTreeMap::new()),
+                };
                 Box::pin(async move {
+                    for (_, mesh) in meshes {
+                        mesh.shutdown().await;
+                    }
                     if let Some(c) = cluster {
                         c.shutdown_all().await;
                     }
