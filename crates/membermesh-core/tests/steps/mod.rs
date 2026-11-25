@@ -1,10 +1,11 @@
+mod membership;
 mod wire;
 
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use cucumber::{World, given, then, when};
-use membermesh_core::{CoreError, MemberClaim, MemberMetadata, SignedClaim};
+use membermesh_core::{CoreError, MemberClaim, MemberMetadata, MembershipTable, SignedClaim};
 use membermesh_testkit::crypto::PeerDirectory;
 
 #[derive(Debug, Default, World)]
@@ -19,6 +20,9 @@ pub struct CoreWorld {
     pub last_error: Option<CoreError>,
     pub last_verify_result: Option<Result<(), CoreError>>,
     pub last_metadata_result: Option<Result<MemberMetadata, CoreError>>,
+    pub tables: BTreeMap<String, MembershipTable>,
+    pub peer_order: Vec<String>,
+    pub pending_claims: Vec<SignedClaim>,
 }
 
 #[given("the membermesh-core library is loaded")]

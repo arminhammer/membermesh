@@ -3,10 +3,15 @@
 //! and deterministic join-order advisory leader election.
 
 mod error;
+mod state;
 mod types;
 mod wire;
 
 pub use error::CoreError;
+pub use state::{
+    ApplyOutcome, LocalNodeInit, MemberEntryState, MemberView, MembershipEvent, MembershipTable,
+    PeerAge, SimInstant,
+};
 pub use types::{
     AddrHint, ClaimSigner, ClaimVerifier, Incarnation, IndirectAlertPayload, IndirectKind,
     JoinOrder, MAX_ADDR_HINT_BYTES, MAX_METADATA_BYTES, MemberClaim, MemberMetadata, MemberStatus,
