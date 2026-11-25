@@ -1,6 +1,8 @@
 #![deny(missing_docs)]
 //! Shared test-only utilities, BDD hang watchdogs, and simulation harnesses.
 
+/// Offline multi-node `iroh` loopback cluster harness and partition injector.
+pub mod cluster;
 /// Deterministic Ed25519 signers and verifiers for tests.
 pub mod crypto;
 /// Co-simulator running `membermesh_core::Engine` over `iroh_gossip::proto::State`.
