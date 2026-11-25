@@ -154,6 +154,7 @@ impl GossipCosimCluster {
                 joined_at_unix_ms: 1_700_000_000_000 + u64::try_from(idx * 100).unwrap_or(0),
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             };
 
             let bootstrap_id = cluster.ordered_ids.last().copied();

@@ -13,7 +13,8 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::debug;
 
 use crate::{
-    IrohSigner, IrohVerifier, MemberMeshError,
+    AdmissionPolicy, EventStream, IrohSigner, IrohVerifier, MemberMeshError,
+    admission::CorePolicyAdapter,
     gossip::{GossipBridge, GossipBridgeEvent, encode_addr_hint, register_addr_hint},
     signer::{endpoint_id_from_peer, peer_id_from_endpoint},
     sync::{ControlClient, ControlFuture, ControlHandler, ControlProtocol},
@@ -120,8 +121,8 @@ pub(crate) struct MeshActorHandle {
 }
 
 impl MeshActorHandle {
-    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<MembershipEvent> {
-        self.events_tx.subscribe()
+    pub(crate) fn subscribe(&self) -> EventStream {
+        EventStream::new(self.events_tx.subscribe())
     }
 
     pub(crate) async fn members(&self) -> Result<Vec<MemberView>, MemberMeshError> {
@@ -241,6 +242,7 @@ pub(crate) async fn spawn_actor(
     topic_id: TopicId,
     config: ProtocolConfig,
     metadata: MemberMetadata,
+    admission: Arc<dyn AdmissionPolicy>,
     bootstrap: Vec<EndpointAddr>,
     client: ControlClient,
     internal_tx: mpsc::UnboundedSender<InternalMsg>,
@@ -258,20 +260,32 @@ pub(crate) async fn spawn_actor(
     let bootstrap_ids: Vec<iroh::EndpointId> = bootstrap.iter().map(|a| a.id).collect();
     let signer = IrohSigner::new(endpoint.secret_key().clone());
     let local_peer = peer_id_from_endpoint(endpoint.id());
+    let session_id = random_session_id();
+    let admission_token = admission.local_token(topic_id, endpoint.id(), session_id);
     let init = LocalNodeInit {
-        session_id: random_session_id(),
+        session_id,
         joined_at_unix_ms: current_unix_ms(),
         metadata,
         addr_hint: encode_addr_hint(&endpoint.addr()),
+        admission_token,
     };
 
+    let core_policy = Box::new(CorePolicyAdapter::new(topic_id, admission));
     let initial_snapshot = fetch_bootstrap_snapshot(&client, &bootstrap, local_peer).await;
     let start_instant = tokio::time::Instant::now();
     let (engine, init_actions) = match initial_snapshot.as_ref() {
-        None => Engine::found(signer, IrohVerifier, init, config, SimInstant(0))?,
-        Some(snap) => Engine::join_after_sync(
+        None => Engine::found_with_policy(
             signer,
             IrohVerifier,
+            core_policy,
+            init,
+            config,
+            SimInstant(0),
+        )?,
+        Some(snap) => Engine::join_after_sync_with_policy(
+            signer,
+            IrohVerifier,
+            core_policy,
             init,
             Some(snap),
             config,

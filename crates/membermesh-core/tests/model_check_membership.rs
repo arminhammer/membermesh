@@ -110,6 +110,7 @@ impl MembershipClusterModel {
             joined_at_unix_ms: 1_700_000_000_000,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         };
         let mut table = if idx == 0 {
             MembershipTable::found(signer, init, SimInstant(0)).expect("found")
@@ -123,6 +124,7 @@ impl MembershipClusterModel {
                 status: membermesh_core::MemberStatus::Alive,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             };
             let signed_claim = SignedClaim::sign(dummy_claim, signer).expect("sign");
             MembershipTable::join_after_sync(
@@ -158,6 +160,7 @@ impl Model for MembershipClusterModel {
                 joined_at_unix_ms: 1_700_000_000_000,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             },
             SimInstant(0),
         )
@@ -170,6 +173,7 @@ impl Model for MembershipClusterModel {
                 joined_at_unix_ms: 1_700_000_000_000,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             },
             Some(&s0),
             &ModelVerifier,
@@ -184,6 +188,7 @@ impl Model for MembershipClusterModel {
                 joined_at_unix_ms: 1_700_000_000_000,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             },
             Some(&s1),
             &ModelVerifier,

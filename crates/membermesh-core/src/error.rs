@@ -74,4 +74,11 @@ pub enum CoreError {
         /// Description of the invalid configuration setting.
         reason: String,
     },
+
+    /// Cluster admission policy rejected a peer claim.
+    #[error("cluster admission denied for peer {peer_short}")]
+    AdmissionDenied {
+        /// Short identifier of the rejected peer.
+        peer_short: String,
+    },
 }

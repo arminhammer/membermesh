@@ -135,6 +135,7 @@ impl SimCluster {
             joined_at_unix_ms: 1_700_000_000_000_u64.saturating_add(self.now.0),
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         };
 
         let seed_snap = self

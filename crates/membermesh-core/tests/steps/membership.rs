@@ -40,6 +40,7 @@ fn setup_sequential_cluster(world: &mut CoreWorld, names: &[&str]) {
             joined_at_unix_ms: 1_700_000_000_000 + (idx as u64) * 1_000,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         };
         let table = if idx == 0 {
             MembershipTable::found(&signer, init, now).expect("found")
@@ -330,6 +331,7 @@ fn rejoin_via_peer(world: &mut CoreWorld, name: String, seed_name: String) {
             joined_at_unix_ms: 1_700_050_000_000,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         },
         Some(&seed_snap),
         &TestVerifier,
@@ -432,6 +434,7 @@ fn independent_founders(world: &mut CoreWorld, a: String, b: String, seq: u64) {
                 joined_at_unix_ms: 1_700_000_000_000,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             },
             SimInstant(100),
         )
@@ -480,6 +483,7 @@ fn peer_with_wall_clock(world: &mut CoreWorld, name: String, seq: u64, unix_ms: 
         joined_at_unix_ms: unix_ms,
         metadata: MemberMetadata::default(),
         addr_hint: None,
+        admission_token: None,
     };
     let table = if seq == 1 {
         MembershipTable::found(&signer, init, SimInstant(100)).expect("found")

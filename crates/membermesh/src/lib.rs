@@ -1,8 +1,37 @@
 #![deny(missing_docs)]
 //! Peer-to-peer cluster membership and advisory leader election over `iroh` and `iroh-gossip`.
+//!
+//! # Quickstart
+//!
+//! ```no_run
+//! use iroh::RelayMode;
+//! use iroh_gossip::TopicId;
+//! use membermesh::MemberMesh;
+//!
+//! # async fn demo() -> Result<(), membermesh::MemberMeshError> {
+//! let topic = TopicId::from_bytes([0x42; 32]);
+//! let node1 = MemberMesh::builder(topic)
+//!     .relay_mode(RelayMode::Disabled)
+//!     .spawn()
+//!     .await?;
+//! let node2 = MemberMesh::builder(topic)
+//!     .relay_mode(RelayMode::Disabled)
+//!     .bootstrap([node1.addr()])
+//!     .spawn()
+//!     .await?;
+//! println!("leader: {:?}", node2.leader().await?);
+//! node2.leave().await?;
+//! node2.shutdown().await;
+//! node1.shutdown().await;
+//! # Ok(())
+//! # }
+//! ```
 
 mod actor;
+mod admission;
+mod config;
 mod error;
+mod events;
 mod gossip;
 mod signer;
 mod sync;
@@ -13,12 +42,14 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, address_lookup::memory::MemoryLookup, protocol::Router,
 };
 use iroh_gossip::{Gossip, TopicId};
-use membermesh_core::{MemberMetadata, MemberView, MembershipEvent, PeerAge, ProtocolConfig};
-use tokio::sync::broadcast;
+use membermesh_core::{MemberMetadata, MemberView, PeerAge, ProtocolConfig};
 
 use crate::actor::{MeshActorHandle, build_control_wiring, spawn_actor};
 
+pub use admission::{AdmissionPolicy, AllowListAdmission, OpenAdmission, SharedSecretAdmission};
+pub use config::MemberMeshBuilder;
 pub use error::{ExternalError, MemberMeshError};
+pub use events::EventStream;
 pub use membermesh_core::crate_version;
 pub use signer::{IrohSigner, IrohVerifier, endpoint_id_from_peer, peer_id_from_endpoint};
 pub use sync::{ControlClient, ControlFuture, ControlHandler, ControlProtocol, SYNC_ALPN};
@@ -31,6 +62,7 @@ pub struct PreparedMemberMesh {
     topic_id: TopicId,
     config: ProtocolConfig,
     metadata: MemberMetadata,
+    admission: Arc<dyn AdmissionPolicy>,
     client: ControlClient,
     internal_tx: tokio::sync::mpsc::UnboundedSender<actor::InternalMsg>,
     internal_rx: tokio::sync::mpsc::UnboundedReceiver<actor::InternalMsg>,
@@ -46,6 +78,13 @@ impl std::fmt::Debug for PreparedMemberMesh {
 }
 
 impl PreparedMemberMesh {
+    /// Attaches a custom [`AdmissionPolicy`] before starting the cluster actor.
+    #[must_use]
+    pub fn with_admission(mut self, admission: Arc<dyn AdmissionPolicy>) -> Self {
+        self.admission = admission;
+        self
+    }
+
     /// Starts the cluster actor and joins `bootstrap` peers once the caller's [`Router`] is running.
     ///
     /// # Errors
@@ -58,6 +97,7 @@ impl PreparedMemberMesh {
             self.topic_id,
             self.config,
             self.metadata,
+            self.admission,
             bootstrap,
             self.client,
             self.internal_tx,
@@ -70,22 +110,43 @@ impl PreparedMemberMesh {
             handle: spawned.handle,
             lookup: spawned.lookup,
             router: None,
+            owns_endpoint: false,
             actor_task: Arc::new(spawned.task),
         })
     }
 }
 
 /// Live handle to a `membermesh` cluster participant running over `iroh` and `iroh-gossip`.
+///
+/// # Doc-test smoke check
+///
+/// ```
+/// use std::sync::Arc;
+/// use iroh_gossip::TopicId;
+/// use membermesh::{MemberMesh, OpenAdmission, SharedSecretAdmission};
+///
+/// let topic = TopicId::from_bytes([7u8; 32]);
+/// let _builder = MemberMesh::builder(topic)
+///     .admission(Arc::new(SharedSecretAdmission::from_passphrase("cluster-secret")));
+/// let _open = Arc::new(OpenAdmission);
+/// ```
 #[derive(Clone, Debug)]
 pub struct MemberMesh {
     endpoint: Endpoint,
     handle: MeshActorHandle,
     lookup: MemoryLookup,
     router: Option<Arc<Router>>,
+    owns_endpoint: bool,
     actor_task: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl MemberMesh {
+    /// Returns a [`MemberMeshBuilder`] for spawning a standalone [`MemberMesh`] node.
+    #[must_use]
+    pub fn builder(topic_id: TopicId) -> MemberMeshBuilder {
+        MemberMeshBuilder::new(topic_id)
+    }
+
     /// Prepares a `membermesh` instance for a caller-managed [`Endpoint`] and [`Router`].
     ///
     /// Register both `iroh_gossip::ALPN` and the returned [`ControlProtocol`] (under [`SYNC_ALPN`])
@@ -106,12 +167,14 @@ impl MemberMesh {
             topic_id,
             config,
             metadata,
+            admission: Arc::new(OpenAdmission),
             client,
             internal_tx,
             internal_rx,
         };
         (prepared, control_protocol)
     }
+
     /// Attaches a `membermesh` cluster instance to an existing caller-managed [`Endpoint`] and [`Gossip`].
     ///
     /// Returns `(mesh, control_protocol)`. The caller must register BOTH
@@ -136,6 +199,7 @@ impl MemberMesh {
             topic_id,
             config,
             metadata,
+            Arc::new(OpenAdmission),
             bootstrap,
             client,
             internal_tx,
@@ -149,13 +213,14 @@ impl MemberMesh {
                 handle: spawned.handle,
                 lookup: spawned.lookup,
                 router: None,
+                owns_endpoint: false,
                 actor_task: Arc::new(spawned.task),
             },
             control_protocol,
         ))
     }
 
-    /// Spawns a standalone [`MemberMesh`] with an owned [`Router`] (for simple callers & tests).
+    /// Spawns a standalone [`MemberMesh`] on an existing [`Endpoint`] with an owned [`Router`].
     ///
     /// # Errors
     ///
@@ -166,6 +231,46 @@ impl MemberMesh {
         config: ProtocolConfig,
         metadata: MemberMetadata,
         bootstrap: Vec<EndpointAddr>,
+    ) -> Result<Self, MemberMeshError> {
+        Self::spawn_on_endpoint_with_admission_owned(
+            endpoint,
+            topic_id,
+            config,
+            metadata,
+            Arc::new(OpenAdmission),
+            bootstrap,
+            false,
+        )
+        .await
+    }
+
+    /// Spawns a standalone [`MemberMesh`] on an existing [`Endpoint`] with an [`AdmissionPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemberMeshError`] if subscribing or bootstrapping fails.
+    pub async fn spawn_on_endpoint_with_admission(
+        endpoint: Endpoint,
+        topic_id: TopicId,
+        config: ProtocolConfig,
+        metadata: MemberMetadata,
+        admission: Arc<dyn AdmissionPolicy>,
+        bootstrap: Vec<EndpointAddr>,
+    ) -> Result<Self, MemberMeshError> {
+        Self::spawn_on_endpoint_with_admission_owned(
+            endpoint, topic_id, config, metadata, admission, bootstrap, false,
+        )
+        .await
+    }
+
+    pub(crate) async fn spawn_on_endpoint_with_admission_owned(
+        endpoint: Endpoint,
+        topic_id: TopicId,
+        config: ProtocolConfig,
+        metadata: MemberMetadata,
+        admission: Arc<dyn AdmissionPolicy>,
+        bootstrap: Vec<EndpointAddr>,
+        owns_endpoint: bool,
     ) -> Result<Self, MemberMeshError> {
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let (control_protocol, client, internal_tx, internal_rx) =
@@ -180,6 +285,7 @@ impl MemberMesh {
             topic_id,
             config,
             metadata,
+            admission,
             bootstrap,
             client,
             internal_tx,
@@ -192,6 +298,7 @@ impl MemberMesh {
             handle: spawned.handle,
             lookup: spawned.lookup,
             router: Some(Arc::new(router)),
+            owns_endpoint,
             actor_task: Arc::new(spawned.task),
         })
     }
@@ -274,9 +381,9 @@ impl MemberMesh {
         self.handle.update_metadata(metadata).await
     }
 
-    /// Subscribes to live [`MembershipEvent`] notifications.
+    /// Subscribes to a typed [`EventStream`] of [`membermesh_core::MembershipEvent`] notifications.
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<MembershipEvent> {
+    pub fn subscribe(&self) -> EventStream {
         self.handle.subscribe()
     }
 
@@ -294,6 +401,9 @@ impl MemberMesh {
         self.actor_task.abort();
         if let Some(router) = &self.router {
             let _ = router.shutdown().await;
+        }
+        if self.owns_endpoint {
+            self.endpoint.close().await;
         }
     }
 }
