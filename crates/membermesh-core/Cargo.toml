@@ -1,0 +1,22 @@
+[package]
+name = "membermesh-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure Sans-I/O SWIM + Lifeguard cluster membership and deterministic join-order state machine"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+cucumber.workspace = true
+membermesh-testkit.workspace = true
+tokio.workspace = true
+
+[[test]]
+name = "features"
+harness = false
