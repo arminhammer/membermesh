@@ -11,4 +11,7 @@ description = "Test-only simulators, watchdogs, and offline iroh harnesses for m
 workspace = true
 
 [dependencies]
+blake3.workspace = true
+ed25519-dalek.workspace = true
+membermesh-core.workspace = true
 tokio.workspace = true

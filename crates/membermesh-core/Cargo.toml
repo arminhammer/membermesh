@@ -11,10 +11,15 @@ description = "Pure Sans-I/O SWIM + Lifeguard cluster membership and determinist
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 cucumber.workspace = true
 membermesh-testkit.workspace = true
+proptest.workspace = true
 tokio.workspace = true
 
 [[test]]

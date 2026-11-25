@@ -1,6 +1,9 @@
 #![deny(missing_docs)]
 //! Shared test-only utilities, BDD hang watchdogs, and simulation harnesses.
 
+/// Deterministic Ed25519 signers and verifiers for tests.
+pub mod crypto;
+
 use std::{fmt, future::Future, time::Duration};
 
 /// Error returned when a BDD scenario exceeds its configured hang watchdog timeout.
