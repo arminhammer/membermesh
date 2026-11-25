@@ -1,0 +1,6 @@
+/target
+/Cargo.lock.bak
+mise.local.toml
+*.swp
+*.swo
+.DS_Store

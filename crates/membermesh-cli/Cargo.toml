@@ -1,0 +1,16 @@
+[package]
+name = "membermesh-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Demo CLI for running local and multi-host membermesh clusters"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+membermesh.workspace = true
+tokio.workspace = true
