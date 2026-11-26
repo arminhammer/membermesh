@@ -82,6 +82,7 @@ async fn setup_cluster(world: &mut MeshWorld, names: &[&str]) {
             joined_at_unix_ms: 1_700_000_000_000,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         };
         let table = Arc::new(Mutex::new(
             MembershipTable::found(&signer, init, SimInstant(0)).expect("found"),
@@ -265,6 +266,7 @@ async fn seed_disjoint_peers(
             status: membermesh_core::MemberStatus::Alive,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         },
         &signer_left,
     )
@@ -279,6 +281,7 @@ async fn seed_disjoint_peers(
             status: membermesh_core::MemberStatus::Alive,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         },
         &signer_right,
     )

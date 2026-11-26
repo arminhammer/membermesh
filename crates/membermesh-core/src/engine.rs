@@ -4,10 +4,10 @@ use bytes::Bytes;
 use tracing::debug;
 
 use crate::{
-    ClaimSigner, ClaimVerifier, ControlMessage, CoreError, GossipEnvelope, GossipItem,
-    GossipMessage, IndirectAlertPayload, IndirectKind, LocalNodeInit, MemberMetadata, MemberStatus,
-    MemberView, MembershipEvent, MembershipTable, PeerAge, PeerId, ProtocolConfig, SessionId,
-    SignedIndirectAlert, SimInstant, SyncSnapshot,
+    AcceptAllPolicy, ClaimPolicy, ClaimSigner, ClaimVerifier, ControlMessage, CoreError,
+    GossipEnvelope, GossipItem, GossipMessage, IndirectAlertPayload, IndirectKind, LocalNodeInit,
+    MemberMetadata, MemberStatus, MemberView, MembershipEvent, MembershipTable, PeerAge, PeerId,
+    ProtocolConfig, SessionId, SignedIndirectAlert, SimInstant, SyncSnapshot,
     swim::{ActiveSuspicion, LhaState, TransmitLimitedQueue},
 };
 
@@ -84,6 +84,7 @@ struct PendingIndirectRelay {
 pub struct Engine<S, V> {
     signer: S,
     verifier: V,
+    policy: Box<dyn ClaimPolicy>,
     config: ProtocolConfig,
     table: MembershipTable,
     lha: LhaState,
@@ -115,11 +116,34 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
         config: ProtocolConfig,
         now: SimInstant,
     ) -> Result<(Self, Vec<EngineAction>), CoreError> {
+        Self::found_with_policy(
+            signer,
+            verifier,
+            Box::new(AcceptAllPolicy),
+            init,
+            config,
+            now,
+        )
+    }
+
+    /// Creates a new cluster engine founded by the local node with a custom [`ClaimPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if `config` is invalid or signing the initial claim fails.
+    pub fn found_with_policy(
+        signer: S,
+        verifier: V,
+        policy: Box<dyn ClaimPolicy>,
+        init: LocalNodeInit,
+        config: ProtocolConfig,
+        now: SimInstant,
+    ) -> Result<(Self, Vec<EngineAction>), CoreError> {
         config.validate()?;
         let rng_seed = seed_from(signer.peer_id(), init.session_id);
         let table = MembershipTable::found(&signer, init, now)?;
         Ok(Self::finish_init(
-            signer, verifier, table, config, rng_seed, now,
+            signer, verifier, policy, table, config, rng_seed, now,
         ))
     }
 
@@ -137,18 +161,51 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
         config: ProtocolConfig,
         now: SimInstant,
     ) -> Result<(Self, Vec<EngineAction>), CoreError> {
+        Self::join_after_sync_with_policy(
+            signer,
+            verifier,
+            Box::new(AcceptAllPolicy),
+            init,
+            initial_snapshot,
+            config,
+            now,
+        )
+    }
+
+    /// Creates a cluster engine initialized from an optional snapshot using a custom [`ClaimPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if `config` is invalid, snapshot verification fails,
+    /// or signing the local claim fails.
+    pub fn join_after_sync_with_policy(
+        signer: S,
+        verifier: V,
+        policy: Box<dyn ClaimPolicy>,
+        init: LocalNodeInit,
+        initial_snapshot: Option<&SyncSnapshot>,
+        config: ProtocolConfig,
+        now: SimInstant,
+    ) -> Result<(Self, Vec<EngineAction>), CoreError> {
         config.validate()?;
         let rng_seed = seed_from(signer.peer_id(), init.session_id);
-        let table =
-            MembershipTable::join_after_sync(&signer, init, initial_snapshot, &verifier, now)?;
+        let table = MembershipTable::join_after_sync_with_policy(
+            &signer,
+            init,
+            initial_snapshot,
+            &verifier,
+            policy.as_ref(),
+            now,
+        )?;
         Ok(Self::finish_init(
-            signer, verifier, table, config, rng_seed, now,
+            signer, verifier, policy, table, config, rng_seed, now,
         ))
     }
 
     fn finish_init(
         signer: S,
         verifier: V,
+        policy: Box<dyn ClaimPolicy>,
         table: MembershipTable,
         config: ProtocolConfig,
         rng_state: u64,
@@ -165,6 +222,7 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
         let mut engine = Self {
             signer,
             verifier,
+            policy,
             config,
             table,
             lha: LhaState::default(),
@@ -500,7 +558,12 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
         match item {
             GossipItem::Claim(claim) => {
                 let subject = claim.claim.subject;
-                let Ok(outcome) = self.table.apply_claim(claim.clone(), &self.verifier, now) else {
+                let Ok(outcome) = self.table.apply_claim_with_policy(
+                    claim.clone(),
+                    &self.verifier,
+                    self.policy.as_ref(),
+                    now,
+                ) else {
                     return false;
                 };
                 for ev in outcome.events {
@@ -618,10 +681,13 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                 }
             }
             ControlMessage::PushPullSync(snapshot) => {
-                let Ok(outcome) =
-                    self.table
-                        .merge_snapshot(&snapshot, &self.verifier, &self.signer, now)
-                else {
+                let Ok(outcome) = self.table.merge_snapshot_with_policy(
+                    &snapshot,
+                    &self.verifier,
+                    &self.signer,
+                    self.policy.as_ref(),
+                    now,
+                ) else {
                     debug!("dropping invalid PushPullSync snapshot from {from}");
                     return;
                 };

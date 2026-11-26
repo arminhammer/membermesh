@@ -133,6 +133,7 @@ impl EngineSwimModel {
                 joined_at_unix_ms: 1_700_000_000_000,
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             };
             let (eng, _) = match prev_snap.as_ref() {
                 None => Engine::found(

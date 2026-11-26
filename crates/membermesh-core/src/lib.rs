@@ -1,6 +1,40 @@
 #![deny(missing_docs)]
 //! Pure Sans-I/O cluster membership, SWIM + Lifeguard failure detection,
 //! and deterministic join-order advisory leader election.
+//!
+//! # Example
+//!
+//! ```
+//! use membermesh_core::{
+//!     ClaimSigner, ClaimVerifier, CoreError, LocalNodeInit, MemberMetadata,
+//!     MembershipTable, PeerId, SessionId, SimInstant,
+//! };
+//!
+//! struct DummySigner(PeerId);
+//! impl ClaimSigner for DummySigner {
+//!     fn peer_id(&self) -> PeerId { self.0 }
+//!     fn sign(&self, _payload: &[u8]) -> [u8; 64] { [0u8; 64] }
+//! }
+//! struct DummyVerifier;
+//! impl ClaimVerifier for DummyVerifier {
+//!     fn verify(&self, _: PeerId, _: &[u8], _: &[u8; 64]) -> Result<(), CoreError> { Ok(()) }
+//! }
+//!
+//! let signer = DummySigner(PeerId::from_bytes([1u8; 32]));
+//! let table = MembershipTable::found(
+//!     &signer,
+//!     LocalNodeInit {
+//!         session_id: SessionId(1),
+//!         joined_at_unix_ms: 1_700_000_000_000,
+//!         metadata: MemberMetadata::default(),
+//!         addr_hint: None,
+//!         admission_token: None,
+//!     },
+//!     SimInstant(0),
+//! )
+//! .expect("found cluster");
+//! assert_eq!(table.leader().map(|m| m.join_seq), Some(1));
+//! ```
 
 mod engine;
 mod error;
@@ -20,9 +54,9 @@ pub use swim::{
     compute_suspicion_timeout_ms, log2_fp1024,
 };
 pub use types::{
-    AddrHint, ClaimSigner, ClaimVerifier, Incarnation, IndirectAlertPayload, IndirectKind,
-    JoinOrder, MAX_ADDR_HINT_BYTES, MAX_METADATA_BYTES, MemberClaim, MemberMetadata, MemberStatus,
-    PeerId, SessionId, SignedClaim, SignedIndirectAlert,
+    AcceptAllPolicy, AddrHint, ClaimPolicy, ClaimSigner, ClaimVerifier, Incarnation,
+    IndirectAlertPayload, IndirectKind, JoinOrder, MAX_ADDR_HINT_BYTES, MAX_METADATA_BYTES,
+    MemberClaim, MemberMetadata, MemberStatus, PeerId, SessionId, SignedClaim, SignedIndirectAlert,
 };
 pub use wire::{
     ControlMessage, DEFAULT_MAX_CONTROL_BYTES, DEFAULT_MAX_GOSSIP_BYTES, GossipEnvelope,

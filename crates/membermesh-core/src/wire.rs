@@ -267,6 +267,7 @@ mod tests {
             status: MemberStatus::Alive,
             metadata: MemberMetadata::default(),
             addr_hint: None,
+            admission_token: None,
         };
         let signed = SignedClaim {
             claim,

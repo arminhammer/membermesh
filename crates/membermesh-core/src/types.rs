@@ -242,6 +242,8 @@ pub struct MemberClaim {
     pub metadata: MemberMetadata,
     /// Optional bounded addressing hint for non-neighbor direct dials.
     pub addr_hint: Option<AddrHint>,
+    /// Optional 32-byte admission credential checked by [`ClaimPolicy`].
+    pub admission_token: Option<[u8; 32]>,
 }
 
 /// Cryptographically signed [`MemberClaim`].
@@ -379,6 +381,26 @@ pub trait ClaimVerifier: Send + Sync {
         payload: &[u8],
         signature: &[u8; 64],
     ) -> Result<(), CoreError>;
+}
+
+/// Policy hook evaluated before admitting remote [`MemberClaim`]s into [`crate::MembershipTable`].
+pub trait ClaimPolicy: Send + Sync + fmt::Debug {
+    /// Returns `Ok(())` if `claim` satisfies cluster admission policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::AdmissionDenied`] when the claim should be rejected.
+    fn authorize(&self, claim: &MemberClaim) -> Result<(), CoreError>;
+}
+
+/// Default permissive [`ClaimPolicy`] that accepts any cryptographically valid claim.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct AcceptAllPolicy;
+
+impl ClaimPolicy for AcceptAllPolicy {
+    fn authorize(&self, _claim: &MemberClaim) -> Result<(), CoreError> {
+        Ok(())
+    }
 }
 
 fn canonical_signable_bytes<T: Serialize>(domain: &[u8], value: &T) -> Result<Vec<u8>, CoreError> {

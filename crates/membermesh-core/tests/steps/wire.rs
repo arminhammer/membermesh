@@ -28,6 +28,7 @@ fn valid_alive_claim(world: &mut CoreWorld, name: String, join_seq: u64) {
         status: MemberStatus::Alive,
         metadata: MemberMetadata::default(),
         addr_hint: None,
+        admission_token: None,
     };
     world.claims.insert(name, claim);
 }
@@ -138,6 +139,7 @@ fn attempt_spoofed_sign(world: &mut CoreWorld, signer_name: String, subject_name
         status: MemberStatus::Alive,
         metadata: MemberMetadata::default(),
         addr_hint: None,
+        admission_token: None,
     };
     let signer = world.peers.signer(&signer_name);
     world.last_error = SignedClaim::sign(claim, signer).err();

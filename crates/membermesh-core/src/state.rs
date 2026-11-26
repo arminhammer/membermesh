@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    AddrHint, ClaimSigner, ClaimVerifier, CoreError, Incarnation, IndirectKind, JoinOrder,
-    MemberClaim, MemberMetadata, MemberStatus, PeerId, SessionId, SignedClaim, SignedIndirectAlert,
-    SyncSnapshot,
+    AcceptAllPolicy, AddrHint, ClaimPolicy, ClaimSigner, ClaimVerifier, CoreError, Incarnation,
+    IndirectKind, JoinOrder, MemberClaim, MemberMetadata, MemberStatus, PeerId, SessionId,
+    SignedClaim, SignedIndirectAlert, SyncSnapshot,
 };
 
 /// Monotonic virtual timestamp in milliseconds used inside `membermesh-core`.
@@ -277,6 +277,8 @@ pub struct LocalNodeInit {
     pub metadata: MemberMetadata,
     /// Optional bounded endpoint addressing hint.
     pub addr_hint: Option<AddrHint>,
+    /// Optional 32-byte admission credential checked by [`ClaimPolicy`].
+    pub admission_token: Option<[u8; 32]>,
 }
 
 /// Deterministic cluster membership table implementing Lamport join ordering,
@@ -313,6 +315,7 @@ impl MembershipTable {
             status: MemberStatus::Alive,
             metadata: init.metadata,
             addr_hint: init.addr_hint,
+            admission_token: init.admission_token,
         };
         let initial_claim = SignedClaim::sign(claim, signer)?;
         let mut entries = BTreeMap::new();
@@ -347,6 +350,22 @@ impl MembershipTable {
         verifier: &impl ClaimVerifier,
         now: SimInstant,
     ) -> Result<Self, CoreError> {
+        Self::join_after_sync_with_policy(signer, init, snapshot, verifier, &AcceptAllPolicy, now)
+    }
+
+    /// Creates a table using a custom [`ClaimPolicy`] to filter any bootstrap snapshot claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if verifying valid claims or signing the local claim fails.
+    pub fn join_after_sync_with_policy(
+        signer: &impl ClaimSigner,
+        init: LocalNodeInit,
+        snapshot: Option<&SyncSnapshot>,
+        verifier: &impl ClaimVerifier,
+        policy: &dyn ClaimPolicy,
+        now: SimInstant,
+    ) -> Result<Self, CoreError> {
         let local_id = signer.peer_id();
         let mut table = Self {
             local_id,
@@ -359,7 +378,7 @@ impl MembershipTable {
         };
 
         if let Some(snap) = snapshot {
-            let _ = table.merge_snapshot(snap, verifier, signer, now)?;
+            let _ = table.merge_snapshot_with_policy(snap, verifier, signer, policy, now)?;
         }
 
         let join_seq = table.lamport_clock.saturating_add(1).max(1);
@@ -374,9 +393,10 @@ impl MembershipTable {
             status: MemberStatus::Alive,
             metadata: init.metadata,
             addr_hint: init.addr_hint,
+            admission_token: init.admission_token,
         };
         let initial_claim = SignedClaim::sign(claim, signer)?;
-        let _ = table.apply_claim_internal(initial_claim, verifier, now)?;
+        let _ = table.apply_claim_internal(initial_claim, verifier, &AcceptAllPolicy, now)?;
         Ok(table)
     }
 
@@ -500,7 +520,23 @@ impl MembershipTable {
         verifier: &impl ClaimVerifier,
         now: SimInstant,
     ) -> Result<ApplyOutcome, CoreError> {
-        self.apply_claim_internal(claim_msg, verifier, now)
+        self.apply_claim_internal(claim_msg, verifier, &AcceptAllPolicy, now)
+    }
+
+    /// Evaluates `policy`, verifies signature, and merges a self-signed [`SignedClaim`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::AdmissionDenied`] if `policy` rejects the claim or
+    /// [`CoreError::InvalidSignature`] if signature verification fails.
+    pub fn apply_claim_with_policy(
+        &mut self,
+        claim_msg: SignedClaim,
+        verifier: &impl ClaimVerifier,
+        policy: &dyn ClaimPolicy,
+        now: SimInstant,
+    ) -> Result<ApplyOutcome, CoreError> {
+        self.apply_claim_internal(claim_msg, verifier, policy, now)
     }
 
     /// Verifies and merges a peer-signed `Suspect` or `Dead` alert.
@@ -537,16 +573,47 @@ impl MembershipTable {
         signer: &impl ClaimSigner,
         now: SimInstant,
     ) -> Result<ApplyOutcome, CoreError> {
-        self.lamport_clock = self.lamport_clock.max(snapshot.lamport_clock);
+        self.merge_snapshot_with_policy(snapshot, verifier, signer, &AcceptAllPolicy, now)
+    }
+
+    /// Verifies and merges a [`SyncSnapshot`], skipping individual claims denied by `policy`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if signature verification on an admitted claim or alert fails.
+    pub fn merge_snapshot_with_policy(
+        &mut self,
+        snapshot: &SyncSnapshot,
+        verifier: &impl ClaimVerifier,
+        signer: &impl ClaimSigner,
+        policy: &dyn ClaimPolicy,
+        now: SimInstant,
+    ) -> Result<ApplyOutcome, CoreError> {
         let mut combined = ApplyOutcome::default();
+        let mut accepted_any = snapshot.claims.is_empty();
 
         for claim in &snapshot.claims {
-            let step = self.apply_claim_internal(claim.clone(), verifier, now)?;
-            combined.changed |= step.changed;
-            combined.events.extend(step.events);
-            if step.refutation.is_some() {
-                combined.refutation = step.refutation;
+            match self.apply_claim_internal(claim.clone(), verifier, policy, now) {
+                Ok(step) => {
+                    accepted_any = true;
+                    combined.changed |= step.changed;
+                    combined.events.extend(step.events);
+                    if step.refutation.is_some() {
+                        combined.refutation = step.refutation;
+                    }
+                }
+                Err(CoreError::AdmissionDenied { .. }) => {
+                    tracing::debug!(
+                        peer = %claim.claim.subject.fmt_short(),
+                        "skipping snapshot claim denied by admission policy"
+                    );
+                }
+                Err(err) => return Err(err),
             }
+        }
+
+        if accepted_any {
+            self.lamport_clock = self.lamport_clock.max(snapshot.lamport_clock);
         }
 
         for alert in &snapshot.indirect_alerts {
@@ -585,7 +652,7 @@ impl MembershipTable {
         signer: &impl ClaimSigner,
         now: SimInstant,
     ) -> Result<(SignedClaim, ApplyOutcome), CoreError> {
-        let (incarnation, join_seq, joined_at_unix_ms, metadata, addr_hint) =
+        let (incarnation, join_seq, joined_at_unix_ms, metadata, addr_hint, admission_token) =
             match self.entries.get(&self.local_id) {
                 Some(existing) => {
                     let c = &existing.state.claim.claim;
@@ -595,6 +662,7 @@ impl MembershipTable {
                         c.joined_at_unix_ms,
                         c.metadata.clone(),
                         c.addr_hint.clone(),
+                        c.admission_token,
                     )
                 }
                 None => (
@@ -602,6 +670,7 @@ impl MembershipTable {
                     self.lamport_clock.saturating_add(1).max(1),
                     0,
                     MemberMetadata::default(),
+                    None,
                     None,
                 ),
             };
@@ -614,6 +683,7 @@ impl MembershipTable {
             status: MemberStatus::Left,
             metadata,
             addr_hint,
+            admission_token,
         };
         let departure_claim = SignedClaim::sign(leave_claim, signer)?;
         let prev_view = self.entries.get(&self.local_id).map(StoredEntry::to_view);
@@ -652,26 +722,34 @@ impl MembershipTable {
         signer: &impl ClaimSigner,
         now: SimInstant,
     ) -> Result<(SignedClaim, ApplyOutcome), CoreError> {
-        let (incarnation, join_seq, joined_at_unix_ms, addr_hint, observed_alive_since) =
-            match self.entries.get(&self.local_id) {
-                Some(existing) => {
-                    let c = &existing.state.claim.claim;
-                    (
-                        existing.state.effective_incarnation.next(),
-                        c.join_seq,
-                        c.joined_at_unix_ms,
-                        c.addr_hint.clone(),
-                        existing.observed_alive_since,
-                    )
-                }
-                None => (
-                    Incarnation(1),
-                    self.lamport_clock.saturating_add(1).max(1),
-                    0,
-                    None,
-                    now,
-                ),
-            };
+        let (
+            incarnation,
+            join_seq,
+            joined_at_unix_ms,
+            addr_hint,
+            admission_token,
+            observed_alive_since,
+        ) = match self.entries.get(&self.local_id) {
+            Some(existing) => {
+                let c = &existing.state.claim.claim;
+                (
+                    existing.state.effective_incarnation.next(),
+                    c.join_seq,
+                    c.joined_at_unix_ms,
+                    c.addr_hint.clone(),
+                    c.admission_token,
+                    existing.observed_alive_since,
+                )
+            }
+            None => (
+                Incarnation(1),
+                self.lamport_clock.saturating_add(1).max(1),
+                0,
+                None,
+                None,
+                now,
+            ),
+        };
         let claim = MemberClaim {
             subject: self.local_id,
             session_id: self.local_session_id,
@@ -681,6 +759,7 @@ impl MembershipTable {
             status: MemberStatus::Alive,
             metadata,
             addr_hint,
+            admission_token,
         };
         let updated_claim = SignedClaim::sign(claim, signer)?;
         let prev = self.entries.get(&self.local_id).map(StoredEntry::to_view);
@@ -793,8 +872,10 @@ impl MembershipTable {
         &mut self,
         claim_msg: SignedClaim,
         verifier: &impl ClaimVerifier,
+        policy: &dyn ClaimPolicy,
         now: SimInstant,
     ) -> Result<ApplyOutcome, CoreError> {
+        policy.authorize(&claim_msg.claim)?;
         let peer_id = claim_msg.claim.subject;
         // Fast path: skip expensive Ed25519 verification for identical or strictly older claims
         // than an already-verified entry or reaped high-water mark.
@@ -849,6 +930,7 @@ impl MembershipTable {
                     status: MemberStatus::Alive,
                     metadata: c.metadata.clone(),
                     addr_hint: c.addr_hint.clone(),
+                    admission_token: c.admission_token,
                 };
                 let refuted = SignedClaim::sign(bumped, signer)?;
                 let mut step = self.merge_peer_state(
@@ -1010,6 +1092,7 @@ mod tests {
                         status,
                         metadata: MemberMetadata::default(),
                         addr_hint: None,
+                        admission_token: None,
                     },
                     signature: sig,
                 };
@@ -1078,6 +1161,7 @@ mod kani_proofs {
                 },
                 metadata: MemberMetadata::default(),
                 addr_hint: None,
+                admission_token: None,
             },
             signature: [kani::any(); 64],
         };
