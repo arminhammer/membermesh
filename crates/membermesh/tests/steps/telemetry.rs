@@ -343,6 +343,11 @@ fn isolated_tracing_cluster(world: &mut MeshWorld, csv: String) {
 #[when(regex = r#"^"([^"]+)" and "([^"]+)" converge and "([^"]+)" gracefully leaves$"#)]
 async fn run_isolated_traced_cluster(world: &mut MeshWorld, a: String, b: String, leaver: String) {
     let captured = tokio::task::spawn_blocking(move || {
+        // Hold two live Dispatch registrations so tracing-core sets `has_just_one = false`,
+        // preventing concurrent `NoSubscriber` scenarios from caching `Interest::never()` on newly
+        // registered callsites while this scoped OpenTelemetry dispatcher is active.
+        let _multi_dispatch_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let span_exporter = InMemorySpanExporter::default();
         let tracer_provider = SdkTracerProvider::builder()
             .with_simple_exporter(span_exporter.clone())
@@ -350,7 +355,9 @@ async fn run_isolated_traced_cluster(world: &mut MeshWorld, a: String, b: String
         let tracer = tracer_provider.tracer(telemetry::METER_NAME);
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         let subscriber = tracing_subscriber::Registry::default().with(otel_layer);
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let otel_dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&otel_dispatch);
+        tracing::callsite::rebuild_interest_cache();
 
         {
             let rt = tokio::runtime::Builder::new_current_thread()
