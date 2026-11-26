@@ -55,6 +55,8 @@ membermesh = { path = "crates/membermesh", version = "0.1.0" }
 membermesh-core = { path = "crates/membermesh-core", version = "0.1.0" }
 membermesh-testkit = { path = "crates/membermesh-testkit", version = "0.1.0" }
 n0-future = "0.3"
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["testing", "metrics", "trace"] }
 postcard = { version = "1.1", features = ["alloc", "use-std"] }
 proptest = "1.12"
 rand = { version = "0.10", features = ["chacha"] }
@@ -63,4 +65,5 @@ stateright = "0.31"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
 tracing = "0.1"
+tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

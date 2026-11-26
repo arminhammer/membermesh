@@ -35,6 +35,7 @@ mod events;
 mod gossip;
 mod signer;
 mod sync;
+pub mod telemetry;
 
 use std::sync::Arc;
 
@@ -66,6 +67,9 @@ pub struct PreparedMemberMesh {
     client: ControlClient,
     internal_tx: tokio::sync::mpsc::UnboundedSender<actor::InternalMsg>,
     internal_rx: tokio::sync::mpsc::UnboundedReceiver<actor::InternalMsg>,
+    metrics: telemetry::MeshMetrics,
+    #[cfg(feature = "otel")]
+    meter: Option<opentelemetry::metrics::Meter>,
 }
 
 impl std::fmt::Debug for PreparedMemberMesh {
@@ -82,6 +86,14 @@ impl PreparedMemberMesh {
     #[must_use]
     pub fn with_admission(mut self, admission: Arc<dyn AdmissionPolicy>) -> Self {
         self.admission = admission;
+        self
+    }
+
+    /// Attaches a custom OpenTelemetry [`opentelemetry::metrics::Meter`] before starting.
+    #[cfg(feature = "otel")]
+    #[must_use]
+    pub fn with_meter(mut self, meter: opentelemetry::metrics::Meter) -> Self {
+        self.meter = Some(meter);
         self
     }
 
@@ -102,6 +114,9 @@ impl PreparedMemberMesh {
             self.client,
             self.internal_tx,
             self.internal_rx,
+            self.metrics,
+            #[cfg(feature = "otel")]
+            self.meter,
         )
         .await?;
 
@@ -159,8 +174,9 @@ impl MemberMesh {
         config: ProtocolConfig,
         metadata: MemberMetadata,
     ) -> (PreparedMemberMesh, ControlProtocol) {
+        let metrics = telemetry::MeshMetrics::lazy();
         let (control_protocol, client, internal_tx, internal_rx) =
-            build_control_wiring(&endpoint, &config);
+            build_control_wiring(&endpoint, &config, &metrics);
         let prepared = PreparedMemberMesh {
             endpoint,
             gossip,
@@ -171,6 +187,9 @@ impl MemberMesh {
             client,
             internal_tx,
             internal_rx,
+            metrics,
+            #[cfg(feature = "otel")]
+            meter: None,
         };
         (prepared, control_protocol)
     }
@@ -191,8 +210,9 @@ impl MemberMesh {
         metadata: MemberMetadata,
         bootstrap: Vec<EndpointAddr>,
     ) -> Result<(Self, ControlProtocol), MemberMeshError> {
+        let metrics = telemetry::MeshMetrics::lazy();
         let (control_protocol, client, internal_tx, internal_rx) =
-            build_control_wiring(&endpoint, &config);
+            build_control_wiring(&endpoint, &config, &metrics);
         let spawned = spawn_actor(
             endpoint.clone(),
             gossip,
@@ -204,6 +224,9 @@ impl MemberMesh {
             client,
             internal_tx,
             internal_rx,
+            metrics,
+            #[cfg(feature = "otel")]
+            None,
         )
         .await?;
 
@@ -240,6 +263,8 @@ impl MemberMesh {
             Arc::new(OpenAdmission),
             bootstrap,
             false,
+            #[cfg(feature = "otel")]
+            None,
         )
         .await
     }
@@ -258,11 +283,23 @@ impl MemberMesh {
         bootstrap: Vec<EndpointAddr>,
     ) -> Result<Self, MemberMeshError> {
         Self::spawn_on_endpoint_with_admission_owned(
-            endpoint, topic_id, config, metadata, admission, bootstrap, false,
+            endpoint,
+            topic_id,
+            config,
+            metadata,
+            admission,
+            bootstrap,
+            false,
+            #[cfg(feature = "otel")]
+            None,
         )
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "internal constructor wiring endpoint ownership, admission policy, and optional OTel meter"
+    )]
     pub(crate) async fn spawn_on_endpoint_with_admission_owned(
         endpoint: Endpoint,
         topic_id: TopicId,
@@ -271,10 +308,12 @@ impl MemberMesh {
         admission: Arc<dyn AdmissionPolicy>,
         bootstrap: Vec<EndpointAddr>,
         owns_endpoint: bool,
+        #[cfg(feature = "otel")] meter: Option<opentelemetry::metrics::Meter>,
     ) -> Result<Self, MemberMeshError> {
         let gossip = Gossip::builder().spawn(endpoint.clone());
+        let metrics = telemetry::MeshMetrics::lazy();
         let (control_protocol, client, internal_tx, internal_rx) =
-            build_control_wiring(&endpoint, &config);
+            build_control_wiring(&endpoint, &config, &metrics);
         let router = Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(SYNC_ALPN, control_protocol)
@@ -290,6 +329,9 @@ impl MemberMesh {
             client,
             internal_tx,
             internal_rx,
+            metrics,
+            #[cfg(feature = "otel")]
+            meter,
         )
         .await?;
 

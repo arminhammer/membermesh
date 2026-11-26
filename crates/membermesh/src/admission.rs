@@ -4,7 +4,7 @@ use iroh::EndpointId;
 use iroh_gossip::TopicId;
 use membermesh_core::{ClaimPolicy, CoreError, MemberClaim, SessionId};
 
-use crate::{MemberMeshError, signer::endpoint_id_from_peer};
+use crate::{MemberMeshError, signer::endpoint_id_from_peer, telemetry::MeshMetrics};
 
 const ADMISSION_DOMAIN: &[u8] = b"membermesh-admission-v1";
 
@@ -160,20 +160,41 @@ impl AdmissionPolicy for SharedSecretAdmission {
 pub(crate) struct CorePolicyAdapter {
     topic_id: TopicId,
     policy: Arc<dyn AdmissionPolicy>,
+    metrics: MeshMetrics,
 }
 
 impl CorePolicyAdapter {
-    pub(crate) const fn new(topic_id: TopicId, policy: Arc<dyn AdmissionPolicy>) -> Self {
-        Self { topic_id, policy }
+    pub(crate) const fn new(
+        topic_id: TopicId,
+        policy: Arc<dyn AdmissionPolicy>,
+        metrics: MeshMetrics,
+    ) -> Self {
+        Self {
+            topic_id,
+            policy,
+            metrics,
+        }
     }
 }
 
 impl ClaimPolicy for CorePolicyAdapter {
     fn authorize(&self, claim: &MemberClaim) -> Result<(), CoreError> {
-        self.policy
-            .verify_claim(self.topic_id, claim)
-            .map_err(|_| CoreError::AdmissionDenied {
+        if let Ok(()) = self.policy.verify_claim(self.topic_id, claim) {
+            self.metrics.record_admission(true);
+            tracing::debug!(
+                peer = %claim.subject.fmt_short(),
+                "cluster admission allowed"
+            );
+            Ok(())
+        } else {
+            self.metrics.record_admission(false);
+            tracing::warn!(
+                peer = %claim.subject.fmt_short(),
+                "cluster admission denied"
+            );
+            Err(CoreError::AdmissionDenied {
                 peer_short: claim.subject.fmt_short(),
             })
+        }
     }
 }

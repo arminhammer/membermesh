@@ -98,6 +98,24 @@ cargo run -p membermesh-cli -- start --topic demo --no-relay --bootstrap <HEX_TI
 
 Use `--secret <passphrase>` on both nodes to enforce `SharedSecretAdmission`, or omit `--no-relay` for cross-NAT peers over `iroh` relays. Press `Ctrl+C` on the leader to observe deterministic leadership handoff.
 
+## Observability (OpenTelemetry Metrics & Tracing)
+
+The default `otel` feature instruments `membermesh` with OpenTelemetry metrics (`opentelemetry` `0.33`) and structured `tracing` spans (`membermesh.actor.*`, `membermesh.rpc.*`, `membermesh.engine.*`) compatible with `tracing-opentelemetry`.
+
+| Metric | Type | Attributes |
+|--------|------|------------|
+| `membermesh.members.active`, `.alive`, `.suspect` | `Gauge<u64>` | `topic` |
+| `membermesh.cluster.epoch`, `.lha.score`, `.is_leader` | `Gauge<u64>` | `topic` |
+| `membermesh.events.total` | `Counter<u64>` | `topic`, `event` |
+| `membermesh.gossip.broadcast.total` | `Counter<u64>` | `topic`, `outcome` |
+| `membermesh.gossip.broadcast.bytes` | `Histogram<u64>` | `topic`, `outcome` |
+| `membermesh.gossip.received.total` | `Counter<u64>` | `topic`, `kind` |
+| `membermesh.rpc.sent.total`, `membermesh.rpc.duration` | `Counter<u64>` / `Histogram<f64>` | `method`, `outcome` |
+| `membermesh.rpc.received.total` | `Counter<u64>` | `method` |
+| `membermesh.admission.checks.total` | `Counter<u64>` | `topic`, `outcome` |
+
+Pass a custom `opentelemetry::metrics::Meter` via `MemberMesh::builder(topic).meter(meter)` or `PreparedMemberMesh::with_meter(meter)` (or set a global `opentelemetry::global::set_meter_provider`), and disable default features (`default-features = false`) to compile `membermesh` without OpenTelemetry dependencies.
+
 ## Verification & Testing
 
 - **Standard suite** (unit tests, `proptest` fuzzing, `stateright` model checks, offline `iroh` + `iroh-gossip` BDD scenarios, live trace invariant checker, doc tests):

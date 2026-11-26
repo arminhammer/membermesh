@@ -10,7 +10,7 @@ use membermesh_core::{
     MembershipEvent, PeerAge, PeerId, ProtocolConfig, SessionId, SimInstant, SyncSnapshot,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
-use tracing::debug;
+use tracing::{Instrument as _, debug, debug_span, info_span};
 
 use crate::{
     AdmissionPolicy, EventStream, IrohSigner, IrohVerifier, MemberMeshError,
@@ -18,6 +18,7 @@ use crate::{
     gossip::{GossipBridge, GossipBridgeEvent, encode_addr_hint, register_addr_hint},
     signer::{endpoint_id_from_peer, peer_id_from_endpoint},
     sync::{ControlClient, ControlFuture, ControlHandler, ControlProtocol},
+    telemetry::MeshMetrics,
 };
 
 const MAX_INFLIGHT_RPCS: usize = 16;
@@ -213,6 +214,7 @@ pub(crate) struct SpawnedActor {
 pub(crate) fn build_control_wiring(
     endpoint: &Endpoint,
     config: &ProtocolConfig,
+    metrics: &MeshMetrics,
 ) -> (
     ControlProtocol,
     ControlClient,
@@ -220,9 +222,9 @@ pub(crate) fn build_control_wiring(
     mpsc::UnboundedReceiver<InternalMsg>,
 ) {
     let rpc_timeout = Duration::from_millis(config.probe_timeout_ms.saturating_mul(2).max(1_000));
-    let client = ControlClient::new(endpoint.clone(), rpc_timeout);
+    let client = ControlClient::new(endpoint.clone(), rpc_timeout).with_metrics(metrics.clone());
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-    let (control_protocol, slot) = ControlProtocol::deferred();
+    let (control_protocol, slot) = ControlProtocol::deferred_with_metrics(metrics.clone());
     let handler: Arc<dyn ControlHandler> = Arc::new(ActorControlHandler {
         local_id: peer_id_from_endpoint(endpoint.id()),
         tx: internal_tx.clone(),
@@ -234,7 +236,7 @@ pub(crate) fn build_control_wiring(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "internal actor constructor wiring endpoint, gossip, signer, and control channels"
+    reason = "internal actor constructor wiring endpoint, gossip, signer, telemetry, and control channels"
 )]
 pub(crate) async fn spawn_actor(
     endpoint: Endpoint,
@@ -247,97 +249,108 @@ pub(crate) async fn spawn_actor(
     client: ControlClient,
     internal_tx: mpsc::UnboundedSender<InternalMsg>,
     internal_rx: mpsc::UnboundedReceiver<InternalMsg>,
+    metrics: MeshMetrics,
+    #[cfg(feature = "otel")] meter: Option<opentelemetry::metrics::Meter>,
 ) -> Result<SpawnedActor, MemberMeshError> {
-    let lookup = MemoryLookup::new();
-    if let Ok(addr_lookup) = endpoint.address_lookup() {
-        addr_lookup.add(lookup.clone());
-    }
-    lookup.set_endpoint_info(endpoint.addr());
-    for addr in &bootstrap {
-        lookup.add_endpoint_info(addr.clone());
-    }
-
-    let bootstrap_ids: Vec<iroh::EndpointId> = bootstrap.iter().map(|a| a.id).collect();
-    let signer = IrohSigner::new(endpoint.secret_key().clone());
     let local_peer = peer_id_from_endpoint(endpoint.id());
-    let session_id = random_session_id();
-    let admission_token = admission.local_token(topic_id, endpoint.id(), session_id);
-    let init = LocalNodeInit {
-        session_id,
-        joined_at_unix_ms: current_unix_ms(),
-        metadata,
-        addr_hint: encode_addr_hint(&endpoint.addr()),
-        admission_token,
-    };
+    let start_span = info_span!("membermesh.actor.start", local = %local_peer.fmt_short());
+    async move {
+        #[cfg(feature = "otel")]
+        metrics.init_with_optional_meter(meter.as_ref(), topic_id);
 
-    let core_policy = Box::new(CorePolicyAdapter::new(topic_id, admission));
-    let initial_snapshot = fetch_bootstrap_snapshot(&client, &bootstrap, local_peer).await;
-    let start_instant = tokio::time::Instant::now();
-    let (engine, init_actions) = match initial_snapshot.as_ref() {
-        None => Engine::found_with_policy(
-            signer,
-            IrohVerifier,
-            core_policy,
-            init,
-            config,
-            SimInstant(0),
-        )?,
-        Some(snap) => Engine::join_after_sync_with_policy(
-            signer,
-            IrohVerifier,
-            core_policy,
-            init,
-            Some(snap),
-            config,
-            SimInstant(0),
-        )?,
-    };
-
-    for view in engine.table().all_members_ordered() {
-        register_addr_hint(&lookup, view.addr_hint.as_ref());
-    }
-
-    let (gossip_tx, mut gossip_rx) = mpsc::unbounded_channel();
-    let (bridge, join_waiter) =
-        GossipBridge::subscribe(gossip, topic_id, bootstrap_ids.clone(), gossip_tx).await?;
-
-    let fwd_tx = internal_tx.clone();
-    let gossip_forwarder = tokio::spawn(async move {
-        while let Some(ev) = gossip_rx.recv().await {
-            if fwd_tx.send(InternalMsg::Gossip(ev)).is_err() {
-                break;
-            }
+        let lookup = MemoryLookup::new();
+        if let Ok(addr_lookup) = endpoint.address_lookup() {
+            addr_lookup.add(lookup.clone());
         }
-    });
+        lookup.set_endpoint_info(endpoint.addr());
+        for addr in &bootstrap {
+            lookup.add_endpoint_info(addr.clone());
+        }
 
-    if !bootstrap_ids.is_empty() {
-        join_waiter.wait_bounded(Duration::from_millis(1_500)).await;
+        let bootstrap_ids: Vec<iroh::EndpointId> = bootstrap.iter().map(|a| a.id).collect();
+        let signer = IrohSigner::new(endpoint.secret_key().clone());
+        let session_id = random_session_id();
+        let admission_token = admission.local_token(topic_id, endpoint.id(), session_id);
+        let init = LocalNodeInit {
+            session_id,
+            joined_at_unix_ms: current_unix_ms(),
+            metadata,
+            addr_hint: encode_addr_hint(&endpoint.addr()),
+            admission_token,
+        };
+
+        let core_policy = Box::new(CorePolicyAdapter::new(topic_id, admission, metrics.clone()));
+        let initial_snapshot = fetch_bootstrap_snapshot(&client, &bootstrap, local_peer).await;
+        let start_instant = tokio::time::Instant::now();
+        let (engine, init_actions) = match initial_snapshot.as_ref() {
+            None => Engine::found_with_policy(
+                signer,
+                IrohVerifier,
+                core_policy,
+                init,
+                config,
+                SimInstant(0),
+            )?,
+            Some(snap) => Engine::join_after_sync_with_policy(
+                signer,
+                IrohVerifier,
+                core_policy,
+                init,
+                Some(snap),
+                config,
+                SimInstant(0),
+            )?,
+        };
+
+        for view in engine.table().all_members_ordered() {
+            register_addr_hint(&lookup, view.addr_hint.as_ref());
+        }
+
+        let (gossip_tx, mut gossip_rx) = mpsc::unbounded_channel();
+        let (bridge, join_waiter) =
+            GossipBridge::subscribe(gossip, topic_id, bootstrap_ids.clone(), gossip_tx).await?;
+
+        let fwd_tx = internal_tx.clone();
+        let gossip_forwarder = tokio::spawn(async move {
+            while let Some(ev) = gossip_rx.recv().await {
+                if fwd_tx.send(InternalMsg::Gossip(ev)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        if !bootstrap_ids.is_empty() {
+            join_waiter.wait_bounded(Duration::from_millis(1_500)).await;
+        }
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(128);
+        let (events_tx, _) = tokio::sync::broadcast::channel(256);
+
+        let ctx = ActorLoopCtx {
+            local_peer,
+            start_instant,
+            engine,
+            init_actions,
+            bridge,
+            client,
+            events_tx: events_tx.clone(),
+            lookup: lookup.clone(),
+            internal_tx,
+            internal_rx,
+            cmd_rx,
+            rpc_sem: Arc::new(Semaphore::new(MAX_INFLIGHT_RPCS)),
+            metrics,
+        };
+        let task = tokio::spawn(run_actor_loop(ctx, gossip_forwarder));
+
+        Ok(SpawnedActor {
+            handle: MeshActorHandle { cmd_tx, events_tx },
+            lookup,
+            task,
+        })
     }
-
-    let (cmd_tx, cmd_rx) = mpsc::channel(128);
-    let (events_tx, _) = tokio::sync::broadcast::channel(256);
-
-    let ctx = ActorLoopCtx {
-        local_peer,
-        start_instant,
-        engine,
-        init_actions,
-        bridge,
-        client,
-        events_tx: events_tx.clone(),
-        lookup: lookup.clone(),
-        internal_tx,
-        internal_rx,
-        cmd_rx,
-        rpc_sem: Arc::new(Semaphore::new(MAX_INFLIGHT_RPCS)),
-    };
-    let task = tokio::spawn(run_actor_loop(ctx, gossip_forwarder));
-
-    Ok(SpawnedActor {
-        handle: MeshActorHandle { cmd_tx, events_tx },
-        lookup,
-        task,
-    })
+    .instrument(start_span)
+    .await
 }
 
 struct ActorLoopCtx {
@@ -353,6 +366,7 @@ struct ActorLoopCtx {
     internal_rx: mpsc::UnboundedReceiver<InternalMsg>,
     cmd_rx: mpsc::Receiver<ActorCommand>,
     rpc_sem: Arc<Semaphore>,
+    metrics: MeshMetrics,
 }
 
 async fn run_actor_loop(mut ctx: ActorLoopCtx, gossip_forwarder: tokio::task::JoinHandle<()>) {
@@ -367,9 +381,11 @@ async fn run_actor_loop(mut ctx: ActorLoopCtx, gossip_forwarder: tokio::task::Jo
         &ctx.events_tx,
         &ctx.internal_tx,
         &ctx.rpc_sem,
+        &ctx.metrics,
         &mut next_wakeup,
     )
     .await;
+    record_cluster_metrics(&ctx);
 
     loop {
         let sleep_fut = async {
@@ -393,8 +409,10 @@ async fn run_actor_loop(mut ctx: ActorLoopCtx, gossip_forwarder: tokio::task::Jo
                     &ctx.events_tx,
                     &ctx.internal_tx,
                     &ctx.rpc_sem,
+                    &ctx.metrics,
                     &mut next_wakeup,
                 ).await;
+                record_cluster_metrics(&ctx);
             }
             maybe_internal = ctx.internal_rx.recv() => {
                 let Some(msg) = maybe_internal else {
@@ -422,16 +440,26 @@ async fn handle_internal_msg(
     let now = sim_now(ctx.start_instant);
     let actions = match msg {
         InternalMsg::Gossip(GossipBridgeEvent::Received(bytes)) => {
+            let _span = debug_span!(
+                "membermesh.actor.gossip_rx",
+                local = %ctx.local_peer.fmt_short(),
+                bytes = bytes.len()
+            )
+            .entered();
+            ctx.metrics.record_gossip_received("received");
             let acts = ctx
                 .engine
                 .handle_input(now, EngineInput::GossipReceived(bytes));
             register_all_hints(&ctx.engine, &ctx.lookup);
             acts
         }
-        InternalMsg::Gossip(GossipBridgeEvent::NeighborUp(peer)) => ctx
-            .engine
-            .handle_input(now, EngineInput::NeighborHint(peer)),
+        InternalMsg::Gossip(GossipBridgeEvent::NeighborUp(peer)) => {
+            ctx.metrics.record_gossip_received("neighbor_up");
+            ctx.engine
+                .handle_input(now, EngineInput::NeighborHint(peer))
+        }
         InternalMsg::Gossip(GossipBridgeEvent::Lagged) => {
+            ctx.metrics.record_gossip_received("lagged");
             ctx.engine.handle_input(now, EngineInput::GossipLagged)
         }
         InternalMsg::ControlInbound {
@@ -439,6 +467,12 @@ async fn handle_internal_msg(
             msg,
             reply_tx,
         } => {
+            let _span = debug_span!(
+                "membermesh.actor.control_rx",
+                local = %ctx.local_peer.fmt_short(),
+                from = %from.fmt_short()
+            )
+            .entered();
             let acts = ctx
                 .engine
                 .handle_input(now, EngineInput::ControlReceived { from, msg });
@@ -450,6 +484,12 @@ async fn handle_internal_msg(
             acts
         }
         InternalMsg::ControlAsyncInput { from, msg } => {
+            let _span = debug_span!(
+                "membermesh.actor.control_rx",
+                local = %ctx.local_peer.fmt_short(),
+                from = %from.fmt_short()
+            )
+            .entered();
             let acts = ctx
                 .engine
                 .handle_input(now, EngineInput::ControlReceived { from, msg });
@@ -464,9 +504,11 @@ async fn handle_internal_msg(
         &ctx.events_tx,
         &ctx.internal_tx,
         &ctx.rpc_sem,
+        &ctx.metrics,
         next_wakeup,
     )
     .await;
+    record_cluster_metrics(ctx);
 }
 
 async fn handle_actor_cmd(
@@ -489,20 +531,31 @@ async fn handle_actor_cmd(
             let _ = reply.send(ctx.engine.peer_age(peer_id, now));
         }
         ActorCommand::UpdateMetadata { metadata, reply } => {
-            let actions = ctx
-                .engine
-                .handle_input(now, EngineInput::UpdateMetadata(metadata));
-            dispatch_actions(
-                actions,
-                &ctx.bridge,
-                &ctx.client,
-                &ctx.events_tx,
-                &ctx.internal_tx,
-                &ctx.rpc_sem,
-                next_wakeup,
-            )
+            let span = debug_span!(
+                "membermesh.actor.update_metadata",
+                local = %ctx.local_peer.fmt_short(),
+                bytes = metadata.as_bytes().len()
+            );
+            async {
+                let actions = ctx
+                    .engine
+                    .handle_input(now, EngineInput::UpdateMetadata(metadata));
+                dispatch_actions(
+                    actions,
+                    &ctx.bridge,
+                    &ctx.client,
+                    &ctx.events_tx,
+                    &ctx.internal_tx,
+                    &ctx.rpc_sem,
+                    &ctx.metrics,
+                    next_wakeup,
+                )
+                .await;
+                record_cluster_metrics(ctx);
+                let _ = reply.send(Ok(()));
+            }
+            .instrument(span)
             .await;
-            let _ = reply.send(Ok(()));
         }
         ActorCommand::JoinAdditional { peers, reply } => {
             let mut ids = Vec::with_capacity(peers.len());
@@ -524,42 +577,62 @@ async fn handle_actor_cmd(
             let _ = reply.send(res);
         }
         ActorCommand::Leave(reply) => {
-            let actions = ctx.engine.handle_input(now, EngineInput::LocalLeave);
-            dispatch_actions(
-                actions,
-                &ctx.bridge,
-                &ctx.client,
-                &ctx.events_tx,
-                &ctx.internal_tx,
-                &ctx.rpc_sem,
-                next_wakeup,
-            )
-            .await;
-            let snap = ctx.engine.table().snapshot();
-            let peers: Vec<PeerId> = ctx
-                .engine
-                .table()
-                .members_ordered()
-                .into_iter()
-                .map(|m| m.peer_id)
-                .filter(|&id| id != ctx.local_peer)
-                .take(3)
-                .collect();
-            for p in peers {
-                let c = ctx.client.clone();
-                let s = snap.clone();
-                tokio::spawn(async move {
-                    let _ = c
-                        .send_one_way(p, &ControlMessage::PushPullSync(Box::new(s)))
-                        .await;
-                });
+            let span = info_span!("membermesh.actor.leave", local = %ctx.local_peer.fmt_short());
+            async {
+                let actions = ctx.engine.handle_input(now, EngineInput::LocalLeave);
+                dispatch_actions(
+                    actions,
+                    &ctx.bridge,
+                    &ctx.client,
+                    &ctx.events_tx,
+                    &ctx.internal_tx,
+                    &ctx.rpc_sem,
+                    &ctx.metrics,
+                    next_wakeup,
+                )
+                .await;
+                record_cluster_metrics(ctx);
+                let snap = ctx.engine.table().snapshot();
+                let peers: Vec<PeerId> = ctx
+                    .engine
+                    .table()
+                    .members_ordered()
+                    .into_iter()
+                    .map(|m| m.peer_id)
+                    .filter(|&id| id != ctx.local_peer)
+                    .take(3)
+                    .collect();
+                for p in peers {
+                    let c = ctx.client.clone();
+                    let s = snap.clone();
+                    tokio::spawn(async move {
+                        let _ = c
+                            .send_one_way(p, &ControlMessage::PushPullSync(Box::new(s)))
+                            .await;
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let _ = reply.send(Ok(()));
             }
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            let _ = reply.send(Ok(()));
+            .instrument(span)
+            .await;
             return false;
         }
     }
     true
+}
+
+fn record_cluster_metrics(ctx: &ActorLoopCtx) {
+    let active = ctx.engine.members_ordered();
+    let is_leader = active
+        .first()
+        .is_some_and(|leader| leader.peer_id == ctx.local_peer);
+    ctx.metrics.record_cluster_state(
+        active.iter().map(|view| view.status),
+        ctx.engine.table().cluster_epoch(),
+        ctx.engine.lha_score(),
+        is_leader,
+    );
 }
 
 fn register_all_hints(engine: &Engine<IrohSigner, IrohVerifier>, lookup: &MemoryLookup) {
@@ -590,6 +663,10 @@ async fn fetch_bootstrap_snapshot(
     None
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal action dispatcher forwarding bridge, RPC client, events, and telemetry"
+)]
 async fn dispatch_actions(
     actions: Vec<EngineAction>,
     bridge: &GossipBridge,
@@ -597,13 +674,19 @@ async fn dispatch_actions(
     events_tx: &tokio::sync::broadcast::Sender<MembershipEvent>,
     internal_tx: &mpsc::UnboundedSender<InternalMsg>,
     rpc_sem: &Arc<Semaphore>,
+    metrics: &MeshMetrics,
     next_wakeup: &mut Option<SimInstant>,
 ) {
     for action in actions {
         match action {
             EngineAction::BroadcastGossip(bytes) => {
-                if let Err(err) = bridge.broadcast(bytes).await {
-                    debug!("gossip broadcast skipped: {err}");
+                let payload_len = bytes.len();
+                match bridge.broadcast(bytes).await {
+                    Ok(()) => metrics.record_gossip_broadcast(payload_len, true),
+                    Err(err) => {
+                        metrics.record_gossip_broadcast(payload_len, false);
+                        debug!("gossip broadcast skipped: {err}");
+                    }
                 }
             }
             EngineAction::SendControl { to, msg } => {
@@ -642,6 +725,7 @@ async fn dispatch_actions(
                 );
             }
             EngineAction::EmitEvent(ev) => {
+                metrics.record_event(&ev);
                 let _ = events_tx.send(ev);
             }
             EngineAction::ScheduleWakeup(at) => {

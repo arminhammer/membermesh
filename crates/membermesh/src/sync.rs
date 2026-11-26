@@ -2,7 +2,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use iroh::{
@@ -13,12 +13,13 @@ use iroh::{
 use membermesh_core::{
     ControlMessage, DEFAULT_MAX_CONTROL_BYTES, PeerId, decode_control, encode_control,
 };
-use tracing::debug;
+use tracing::{Instrument as _, debug, info_span};
 
 use crate::{
     MemberMeshError,
     error::ExternalError,
     signer::{endpoint_id_from_peer, peer_id_from_endpoint},
+    telemetry::{MeshMetrics, control_method_label},
 };
 
 /// ALPN identifier for `membermesh` direct QUIC probes and Push/Pull anti-entropy sync.
@@ -53,6 +54,7 @@ impl HandlerSlot {
 pub struct ControlProtocol {
     handler: HandlerSlot,
     max_control_bytes: usize,
+    metrics: MeshMetrics,
 }
 
 impl ControlProtocol {
@@ -62,14 +64,18 @@ impl ControlProtocol {
         Self {
             handler: HandlerSlot::Bound(handler),
             max_control_bytes: DEFAULT_MAX_CONTROL_BYTES,
+            metrics: MeshMetrics::noop(),
         }
     }
 
-    pub(crate) fn deferred() -> (Self, Arc<OnceLock<Arc<dyn ControlHandler>>>) {
+    pub(crate) fn deferred_with_metrics(
+        metrics: MeshMetrics,
+    ) -> (Self, Arc<OnceLock<Arc<dyn ControlHandler>>>) {
         let cell = Arc::new(OnceLock::new());
         let proto = Self {
             handler: HandlerSlot::Deferred(Arc::clone(&cell)),
             max_control_bytes: DEFAULT_MAX_CONTROL_BYTES,
+            metrics,
         };
         (proto, cell)
     }
@@ -94,6 +100,8 @@ impl ControlProtocol {
 
         let frame = read_bounded_frame(&mut recv, self.max_control_bytes).await?;
         let msg = decode_control(&frame, self.max_control_bytes)?;
+        let method = control_method_label(&msg);
+        self.metrics.record_rpc_received(method);
         if let Some(reply) = handler.handle(from, msg).await {
             let encoded = encode_control(&reply, self.max_control_bytes)?;
             write_bounded_frame(&mut send, &encoded).await?;
@@ -107,10 +115,16 @@ impl ControlProtocol {
 
 impl ProtocolHandler for ControlProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        if let Err(err) = self.serve_connection(connection).await {
-            debug!("control stream rejected/closed: {err}");
+        let remote_short = peer_id_from_endpoint(connection.remote_id()).fmt_short();
+        let span = info_span!("membermesh.rpc.accept", remote = %remote_short);
+        async move {
+            if let Err(err) = self.serve_connection(connection).await {
+                debug!("control stream rejected/closed: {err}");
+            }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 }
 
@@ -120,17 +134,24 @@ pub struct ControlClient {
     endpoint: Endpoint,
     max_control_bytes: usize,
     rpc_timeout: Duration,
+    metrics: MeshMetrics,
 }
 
 impl ControlClient {
     /// Creates a new [`ControlClient`] bound to `endpoint`.
     #[must_use]
-    pub const fn new(endpoint: Endpoint, rpc_timeout: Duration) -> Self {
+    pub fn new(endpoint: Endpoint, rpc_timeout: Duration) -> Self {
         Self {
             endpoint,
             max_control_bytes: DEFAULT_MAX_CONTROL_BYTES,
             rpc_timeout,
+            metrics: MeshMetrics::noop(),
         }
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: MeshMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Overrides the maximum encoded frame size in bytes.
@@ -164,26 +185,38 @@ impl ControlClient {
         addr: impl Into<EndpointAddr>,
         msg: &ControlMessage,
     ) -> Result<(), MemberMeshError> {
-        let encoded = encode_control(msg, self.max_control_bytes)?;
+        let method = control_method_label(msg);
         let addr = addr.into();
-        let fut = async {
-            let conn = self
-                .endpoint
-                .connect(addr, SYNC_ALPN)
+        let target_short = peer_id_from_endpoint(addr.id).fmt_short();
+        let span = info_span!("membermesh.rpc.request", method, target = %target_short);
+        let started = Instant::now();
+        let encoded = encode_control(msg, self.max_control_bytes)?;
+        let res = async {
+            let fut = async {
+                let conn = self
+                    .endpoint
+                    .connect(addr, SYNC_ALPN)
+                    .await
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                let (mut send, _recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                write_bounded_frame(&mut send, &encoded).await?;
+                send.finish()
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                Ok::<(), MemberMeshError>(())
+            };
+            tokio::time::timeout(self.rpc_timeout, fut)
                 .await
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            let (mut send, _recv) = conn
-                .open_bi()
-                .await
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            write_bounded_frame(&mut send, &encoded).await?;
-            send.finish()
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            Ok::<(), MemberMeshError>(())
-        };
-        tokio::time::timeout(self.rpc_timeout, fut)
-            .await
-            .map_err(|_| MemberMeshError::RpcTimeout)?
+                .map_err(|_| MemberMeshError::RpcTimeout)?
+        }
+        .instrument(span)
+        .await;
+        let outcome = rpc_outcome_label(&res);
+        self.metrics
+            .record_rpc_sent(method, outcome, started.elapsed());
+        res
     }
 
     /// Sends raw pre-framed bytes (used in tests for malformed/oversized frame checks) and awaits a reply.
@@ -240,28 +273,48 @@ impl ControlClient {
         addr: impl Into<EndpointAddr>,
         msg: &ControlMessage,
     ) -> Result<ControlMessage, MemberMeshError> {
-        let encoded = encode_control(msg, self.max_control_bytes)?;
+        let method = control_method_label(msg);
         let addr = addr.into();
-        let fut = async {
-            let conn = self
-                .endpoint
-                .connect(addr, SYNC_ALPN)
+        let target_short = peer_id_from_endpoint(addr.id).fmt_short();
+        let span = info_span!("membermesh.rpc.request", method, target = %target_short);
+        let started = Instant::now();
+        let encoded = encode_control(msg, self.max_control_bytes)?;
+        let res = async {
+            let fut = async {
+                let conn = self
+                    .endpoint
+                    .connect(addr, SYNC_ALPN)
+                    .await
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                let (mut send, mut recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                write_bounded_frame(&mut send, &encoded).await?;
+                send.finish()
+                    .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
+                let reply_bytes = read_bounded_frame(&mut recv, self.max_control_bytes).await?;
+                let reply = decode_control(&reply_bytes, self.max_control_bytes)?;
+                Ok::<ControlMessage, MemberMeshError>(reply)
+            };
+            tokio::time::timeout(self.rpc_timeout, fut)
                 .await
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            let (mut send, mut recv) = conn
-                .open_bi()
-                .await
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            write_bounded_frame(&mut send, &encoded).await?;
-            send.finish()
-                .map_err(|err| MemberMeshError::Transport(ExternalError::from_display(err)))?;
-            let reply_bytes = read_bounded_frame(&mut recv, self.max_control_bytes).await?;
-            let reply = decode_control(&reply_bytes, self.max_control_bytes)?;
-            Ok::<ControlMessage, MemberMeshError>(reply)
-        };
-        tokio::time::timeout(self.rpc_timeout, fut)
-            .await
-            .map_err(|_| MemberMeshError::RpcTimeout)?
+                .map_err(|_| MemberMeshError::RpcTimeout)?
+        }
+        .instrument(span)
+        .await;
+        let outcome = rpc_outcome_label(&res);
+        self.metrics
+            .record_rpc_sent(method, outcome, started.elapsed());
+        res
+    }
+}
+
+const fn rpc_outcome_label<T>(res: &Result<T, MemberMeshError>) -> &'static str {
+    match res {
+        Ok(_) => "ok",
+        Err(MemberMeshError::RpcTimeout) => "timeout",
+        Err(_) => "err",
     }
 }
 
