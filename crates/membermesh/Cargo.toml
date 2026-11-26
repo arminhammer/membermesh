@@ -11,4 +11,17 @@ description = "HashiCorp memberlist-inspired p2p cluster membership over iroh an
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+iroh.workspace = true
 membermesh-core.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cucumber.workspace = true
+membermesh-testkit.workspace = true
+
+[[test]]
+name = "features"
+harness = false

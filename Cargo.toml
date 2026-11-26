@@ -48,6 +48,7 @@ blake3 = "1.8"
 bytes = { version = "1.10", features = ["serde"] }
 cucumber = "0.23"
 ed25519-dalek = "3.0"
+iroh = "1.5"
 iroh-gossip = "0.103"
 membermesh = { path = "crates/membermesh", version = "0.1.0" }
 membermesh-core = { path = "crates/membermesh-core", version = "0.1.0" }
