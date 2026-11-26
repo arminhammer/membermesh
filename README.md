@@ -99,13 +99,28 @@ Copy the printed `--bootstrap <HEX_TICKET>` into Terminal 2:
 cargo run -p membermesh-cli -- start --topic demo --no-relay --bootstrap <HEX_TICKET>
 ```
 
-### Option 2: Optional LAN Auto-Discovery (Zero-Ticket)
+### Option 2: Local Test with Auto-Discovery (`--auto-discover`)
 
-Pass `--auto-discover` in both terminals on the same local network (can also be combined with `--bootstrap <HEX_TICKET>`):
+Run a zero-ticket local cluster across two (or more) terminals on the same machine or LAN using UDP multicast discovery (`239.255.42.99:5354`):
+
+Terminal 1:
 
 ```bash
-cargo run -p membermesh-cli -- start --topic demo --no-relay --auto-discover
+cargo run -p membermesh-cli -- start --topic demo --no-relay --auto-discover --metadata node-a
 ```
+
+Terminal 2 (no `--bootstrap` ticket needed):
+
+```bash
+cargo run -p membermesh-cli -- start --topic demo --no-relay --auto-discover --metadata node-b
+```
+
+You should see `Discovery: enabled (UDP multicast 239.255.42.99:5354)` at startup, followed within a few seconds by both terminals converging on a 2-node membership table with a shared `LEADER`.
+
+* **Observe failover**: Press `Ctrl+C` in the `LEADER` terminal to trigger a graceful leave and watch the remaining node promote itself.
+* **Verify admission enforcement**: Add `--secret my-cluster-secret` to both commands; a third terminal without `--secret` (or with a mismatched secret) will be ignored even if it shares the same `--topic`.
+* **Hybrid mode**: Combine `--auto-discover` with `--bootstrap <HEX_TICKET>` to discover LAN peers automatically while still dialing remote/explicit peers by ticket.
+* **Verbose discovery logs**: Prefix the command with `RUST_LOG=membermesh=debug` to inspect multicast interface fallback and beacon send/receive activity.
 
 Use `--secret <passphrase>` on both nodes to enforce `SharedSecretAdmission`, or omit `--no-relay` for cross-NAT peers over `iroh` relays. Press `Ctrl+C` on the leader to observe deterministic leadership handoff.
 
@@ -132,6 +147,11 @@ Pass a custom `opentelemetry::metrics::Meter` via `MemberMesh::builder(topic).me
 - **Standard suite** (unit tests, `proptest` fuzzing, `stateright` model checks, offline `iroh` + `iroh-gossip` BDD scenarios, live trace invariant checker, doc tests):
   ```bash
   cargo test --workspace --locked
+  ```
+- **LAN auto-discovery tests** (beacon codec unit tests + Cucumber BDD scenarios for auto-discovery, topic isolation, ticket coexistence, and admission rejection):
+  ```bash
+  cargo test -p membermesh --lib discovery --locked
+  cargo test -p membermesh --test features --locked
   ```
 - **Long-horizon soak & scale BDD suite** (20-node virtual churn/partition storm + 8-node live rolling restart):
   ```bash

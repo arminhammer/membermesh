@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_gossip::TopicId;
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -238,28 +238,13 @@ fn jittered_delay(local_id: EndpointId, base_ms: u64, tick: u64) -> Duration {
     Duration::from_millis(base_ms.saturating_add(jitter_ms))
 }
 
-fn sanitize_local_addr(mut addr: EndpointAddr, prefer_loopback: bool) -> EndpointAddr {
-    if prefer_loopback {
-        let has_ip = addr.addrs.iter().any(|t| matches!(t, TransportAddr::Ip(_)));
-        if !has_ip {
-            return addr;
-        }
-        addr.addrs.retain(|t| match t {
-            TransportAddr::Ip(sock) => sock.ip().is_loopback(),
-            TransportAddr::Relay(_) | _ => true,
-        });
-    }
-    addr
-}
-
 async fn send_beacon(
     endpoint: &Endpoint,
     socket: &UdpSocket,
     topic_id: TopicId,
     target: SocketAddr,
-    prefer_loopback: bool,
 ) {
-    let addr = sanitize_local_addr(endpoint.addr(), prefer_loopback);
+    let addr = endpoint.addr();
     if let Some(bytes) = encode_beacon(topic_id, &addr)
         && let Err(err) = socket.send_to(&bytes, target).await
     {
@@ -282,7 +267,6 @@ pub(crate) fn spawn_discovery_task(
     };
 
     let target = SocketAddr::V4(SocketAddrV4::new(config.multicast_addr, config.port));
-    let prefer_loopback = config.interface == Some(Ipv4Addr::LOCALHOST);
     let local_id = endpoint.id();
     let base_ms = u64::try_from(config.beacon_interval.as_millis())
         .unwrap_or(u64::MAX)
@@ -290,7 +274,7 @@ pub(crate) fn spawn_discovery_task(
 
     let handle = tokio::spawn(async move {
         // Emit an immediate beacon so newly joined peers discover each other promptly.
-        send_beacon(&endpoint, &socket, topic_id, target, prefer_loopback).await;
+        send_beacon(&endpoint, &socket, topic_id, target).await;
 
         let mut tick_count: u64 = 1;
         let mut timer = pin!(sleep(jittered_delay(local_id, base_ms, tick_count)));
@@ -299,7 +283,7 @@ pub(crate) fn spawn_discovery_task(
         loop {
             tokio::select! {
                 () = &mut timer => {
-                    send_beacon(&endpoint, &socket, topic_id, target, prefer_loopback).await;
+                    send_beacon(&endpoint, &socket, topic_id, target).await;
                     tick_count = tick_count.wrapping_add(1);
                     let next_deadline = Instant::now() + jittered_delay(local_id, base_ms, tick_count);
                     timer.as_mut().reset(next_deadline);
@@ -415,5 +399,20 @@ mod tests {
         let cfg = DiscoveryConfig::loopback(0).with_multicast_addr(Ipv4Addr::LOCALHOST);
         let err = bind_discovery_socket(&cfg).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn beacon_preserves_non_loopback_ip_addresses() {
+        let key = SecretKey::from_bytes(&[0x44; 32]);
+        let mut addr = EndpointAddr::new(key.public());
+        let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 4)), 9001);
+        addr.addrs.insert(TransportAddr::Ip(lan_sock));
+        let topic = TopicId::from_bytes([0x99; 32]);
+
+        let bytes = encode_beacon(topic, &addr).expect("encode beacon");
+        let (decoded_topic, decoded_addr) = decode_beacon(&bytes).expect("decode beacon");
+
+        assert_eq!(decoded_topic, topic);
+        assert!(decoded_addr.addrs.contains(&TransportAddr::Ip(lan_sock)));
     }
 }
