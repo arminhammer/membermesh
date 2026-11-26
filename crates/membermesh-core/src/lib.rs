@@ -2,6 +2,21 @@
 //! Pure Sans-I/O cluster membership, SWIM + Lifeguard failure detection,
 //! and deterministic join-order advisory leader election.
 
+mod error;
+mod types;
+mod wire;
+
+pub use error::CoreError;
+pub use types::{
+    AddrHint, ClaimSigner, ClaimVerifier, Incarnation, IndirectAlertPayload, IndirectKind,
+    JoinOrder, MAX_ADDR_HINT_BYTES, MAX_METADATA_BYTES, MemberClaim, MemberMetadata, MemberStatus,
+    PeerId, SessionId, SignedClaim, SignedIndirectAlert,
+};
+pub use wire::{
+    ControlMessage, DEFAULT_MAX_CONTROL_BYTES, DEFAULT_MAX_GOSSIP_BYTES, GossipEnvelope,
+    GossipItem, GossipMessage, SyncSnapshot, WIRE_VERSION, decode_control, encode_control,
+};
+
 /// Workspace scaffold version marker for initial smoke checks.
 #[must_use]
 pub const fn crate_version() -> &'static str {
