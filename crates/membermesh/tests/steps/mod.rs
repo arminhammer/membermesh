@@ -2,13 +2,18 @@ mod api;
 mod cluster;
 mod soak;
 mod sync;
+mod telemetry;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use cucumber::World;
 use membermesh::{ControlClient, MemberMesh};
 use membermesh_core::{ControlMessage, MembershipEvent, MembershipTable};
 use membermesh_testkit::{cluster::LocalIrohCluster, sim::SimCluster, trace::TraceRecorder};
+use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
 use tokio::sync::Mutex;
 
 #[derive(Default, World)]
@@ -26,6 +31,9 @@ pub struct MeshWorld {
     pub event_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub sim: Option<SimCluster>,
     pub sim_survivors: Vec<String>,
+    pub otel_metric_provider: Option<SdkMeterProvider>,
+    pub otel_metric_exporter: Option<InMemoryMetricExporter>,
+    pub captured_span_names: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for MeshWorld {

@@ -19,6 +19,8 @@ pub struct MemberMeshBuilder {
     admission: Arc<dyn AdmissionPolicy>,
     bootstrap: Vec<EndpointAddr>,
     relay_mode: RelayMode,
+    #[cfg(feature = "otel")]
+    meter: Option<opentelemetry::metrics::Meter>,
 }
 
 impl MemberMeshBuilder {
@@ -33,6 +35,8 @@ impl MemberMeshBuilder {
             admission: Arc::new(OpenAdmission),
             bootstrap: Vec::new(),
             relay_mode: RelayMode::Default,
+            #[cfg(feature = "otel")]
+            meter: None,
         }
     }
 
@@ -78,6 +82,16 @@ impl MemberMeshBuilder {
         self
     }
 
+    /// Configures a custom OpenTelemetry [`opentelemetry::metrics::Meter`] for this node.
+    ///
+    /// When omitted, `membermesh` uses `opentelemetry::global::meter(telemetry::METER_NAME)`.
+    #[cfg(feature = "otel")]
+    #[must_use]
+    pub fn meter(mut self, meter: opentelemetry::metrics::Meter) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
     /// Binds an `iroh` [`Endpoint`], spawns `Gossip` + `Router`, and starts the cluster actor.
     ///
     /// # Errors
@@ -106,6 +120,8 @@ impl MemberMeshBuilder {
             self.admission,
             self.bootstrap,
             true,
+            #[cfg(feature = "otel")]
+            self.meter,
         )
         .await
     }

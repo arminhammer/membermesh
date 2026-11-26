@@ -322,6 +322,12 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
 
     /// Processes a single [`EngineInput`] at monotonic time `now` and returns [`EngineAction`]s.
     pub fn handle_input(&mut self, now: SimInstant, input: EngineInput) -> Vec<EngineAction> {
+        let _span = tracing::debug_span!(
+            "membermesh.engine.input",
+            local = %self.table.local_id().fmt_short(),
+            now_ms = now.0
+        )
+        .entered();
         let mut actions = Vec::new();
         if self.left {
             return actions;
@@ -595,6 +601,11 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                     actions.push(EngineAction::EmitEvent(ev));
                 }
                 if let Some(refute) = outcome.refutation {
+                    tracing::info!(
+                        local = %self.table.local_id().fmt_short(),
+                        incarnation = refute.claim.incarnation.0,
+                        "local peer refuted indirect alert"
+                    );
                     self.lha.increment();
                     self.queue.push(GossipItem::Claim(refute));
                 }
@@ -740,6 +751,11 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                 actions.push(EngineAction::EmitEvent(ev));
             }
             if transitioned {
+                tracing::debug!(
+                    local = %self.table.local_id().fmt_short(),
+                    target = %target.fmt_short(),
+                    "marking peer suspect"
+                );
                 self.queue.push(GossipItem::IndirectAlert(alert));
                 self.flush_gossip(actions, 1);
             }
@@ -778,6 +794,11 @@ impl<S: ClaimSigner, V: ClaimVerifier> Engine<S, V> {
                 actions.push(EngineAction::EmitEvent(ev));
             }
             if transitioned {
+                tracing::debug!(
+                    local = %self.table.local_id().fmt_short(),
+                    target = %target.fmt_short(),
+                    "marking peer suspect"
+                );
                 self.queue.push(GossipItem::IndirectAlert(alert));
                 self.flush_gossip(actions, 1);
             }
