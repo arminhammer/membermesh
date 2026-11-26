@@ -17,6 +17,7 @@ use crate::crypto::{TestSigner, TestVerifier};
 enum ScheduledEvent {
     EngineWakeup {
         node: String,
+        at: SimInstant,
     },
     DeliverGossip {
         to: String,
@@ -72,6 +73,7 @@ struct SimNode {
     crashed: bool,
     stalled_until: Option<SimInstant>,
     drop_incoming_gossip: bool,
+    next_wakeup: Option<SimInstant>,
     events: Vec<MembershipEvent>,
 }
 
@@ -164,6 +166,7 @@ impl SimCluster {
             crashed: false,
             stalled_until: None,
             drop_incoming_gossip: false,
+            next_wakeup: None,
             events: Vec::new(),
         };
         self.by_id.insert(peer_id, name.to_owned());
@@ -255,10 +258,12 @@ impl SimCluster {
         let wake_at = self.now.saturating_add_ms(stall_ms);
         if let Some(node) = self.nodes.get_mut(name) {
             node.stalled_until = Some(wake_at);
+            node.next_wakeup = Some(wake_at);
             self.push_event(
                 wake_at,
                 ScheduledEvent::EngineWakeup {
                     node: name.to_owned(),
+                    at: wake_at,
                 },
             );
         }
@@ -315,6 +320,15 @@ impl SimCluster {
             .unwrap_or_default()
     }
 
+    /// Returns all known non-reaped member views (including tombstones) observed by `name`.
+    #[must_use]
+    pub fn all_members(&self, name: &str) -> Vec<MemberView> {
+        self.nodes
+            .get(name)
+            .map(|n| n.engine.table().all_members_ordered())
+            .unwrap_or_default()
+    }
+
     /// Returns the advisory leader name observed by `name`.
     #[must_use]
     pub fn leader_name(&self, name: &str) -> Option<String> {
@@ -337,12 +351,12 @@ impl SimCluster {
 
     fn process_event(&mut self, event: ScheduledEvent) {
         match event {
-            ScheduledEvent::EngineWakeup { node } => {
+            ScheduledEvent::EngineWakeup { node, at } => {
                 let actions = {
                     let Some(n) = self.nodes.get_mut(&node) else {
                         return;
                     };
-                    if n.crashed {
+                    if n.crashed || n.next_wakeup != Some(at) {
                         return;
                     }
                     if let Some(until) = n.stalled_until {
@@ -351,6 +365,7 @@ impl SimCluster {
                         }
                         n.stalled_until = None;
                     }
+                    n.next_wakeup = None;
                     n.engine.handle_input(self.now, EngineInput::Tick)
                 };
                 self.dispatch_actions(&node, actions);
@@ -513,16 +528,21 @@ impl SimCluster {
                     }
                 }
                 EngineAction::ScheduleWakeup(at) => {
-                    let stalled = self
-                        .nodes
-                        .get(from_name)
-                        .and_then(|n| n.stalled_until)
-                        .is_some_and(|until| at < until);
-                    if !stalled {
+                    let should_schedule = self.nodes.get_mut(from_name).is_some_and(|n| {
+                        let stalled = n.stalled_until.is_some_and(|until| at < until);
+                        if stalled || n.next_wakeup == Some(at) {
+                            false
+                        } else {
+                            n.next_wakeup = Some(at);
+                            true
+                        }
+                    });
+                    if should_schedule {
                         self.push_event(
                             at,
                             ScheduledEvent::EngineWakeup {
                                 node: from_name.to_owned(),
+                                at,
                             },
                         );
                     }

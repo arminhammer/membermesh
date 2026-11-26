@@ -1,5 +1,6 @@
 mod api;
 mod cluster;
+mod soak;
 mod sync;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -7,7 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use cucumber::World;
 use membermesh::{ControlClient, MemberMesh};
 use membermesh_core::{ControlMessage, MembershipEvent, MembershipTable};
-use membermesh_testkit::{cluster::LocalIrohCluster, trace::TraceRecorder};
+use membermesh_testkit::{cluster::LocalIrohCluster, sim::SimCluster, trace::TraceRecorder};
 use tokio::sync::Mutex;
 
 #[derive(Default, World)]
@@ -23,6 +24,8 @@ pub struct MeshWorld {
     pub trace: TraceRecorder,
     pub observed_events: Option<Arc<Mutex<Vec<MembershipEvent>>>>,
     pub event_tasks: Vec<tokio::task::JoinHandle<()>>,
+    pub sim: Option<SimCluster>,
+    pub sim_survivors: Vec<String>,
 }
 
 impl std::fmt::Debug for MeshWorld {
