@@ -30,6 +30,7 @@
 mod actor;
 mod admission;
 mod config;
+mod discovery;
 mod error;
 mod events;
 mod gossip;
@@ -49,6 +50,9 @@ use crate::actor::{MeshActorHandle, build_control_wiring, spawn_actor};
 
 pub use admission::{AdmissionPolicy, AllowListAdmission, OpenAdmission, SharedSecretAdmission};
 pub use config::MemberMeshBuilder;
+pub use discovery::{
+    DEFAULT_BEACON_INTERVAL, DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_ADDR, DiscoveryConfig,
+};
 pub use error::{ExternalError, MemberMeshError};
 pub use events::EventStream;
 pub use membermesh_core::crate_version;
@@ -64,6 +68,7 @@ pub struct PreparedMemberMesh {
     config: ProtocolConfig,
     metadata: MemberMetadata,
     admission: Arc<dyn AdmissionPolicy>,
+    discovery: Option<DiscoveryConfig>,
     client: ControlClient,
     internal_tx: tokio::sync::mpsc::UnboundedSender<actor::InternalMsg>,
     internal_rx: tokio::sync::mpsc::UnboundedReceiver<actor::InternalMsg>,
@@ -89,6 +94,13 @@ impl PreparedMemberMesh {
         self
     }
 
+    /// Configures optional LAN multicast peer auto-discovery before starting the cluster actor.
+    #[must_use]
+    pub fn with_discovery(mut self, discovery: DiscoveryConfig) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
+
     /// Attaches a custom OpenTelemetry [`opentelemetry::metrics::Meter`] before starting.
     #[cfg(feature = "otel")]
     #[must_use]
@@ -111,6 +123,7 @@ impl PreparedMemberMesh {
             self.metadata,
             self.admission,
             bootstrap,
+            self.discovery,
             self.client,
             self.internal_tx,
             self.internal_rx,
@@ -184,6 +197,7 @@ impl MemberMesh {
             config,
             metadata,
             admission: Arc::new(OpenAdmission),
+            discovery: None,
             client,
             internal_tx,
             internal_rx,
@@ -221,6 +235,7 @@ impl MemberMesh {
             metadata,
             Arc::new(OpenAdmission),
             bootstrap,
+            None,
             client,
             internal_tx,
             internal_rx,
@@ -262,6 +277,7 @@ impl MemberMesh {
             metadata,
             Arc::new(OpenAdmission),
             bootstrap,
+            None,
             false,
             #[cfg(feature = "otel")]
             None,
@@ -289,6 +305,7 @@ impl MemberMesh {
             metadata,
             admission,
             bootstrap,
+            None,
             false,
             #[cfg(feature = "otel")]
             None,
@@ -298,7 +315,7 @@ impl MemberMesh {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "internal constructor wiring endpoint ownership, admission policy, and optional OTel meter"
+        reason = "internal constructor wiring endpoint ownership, admission policy, discovery, and optional OTel meter"
     )]
     pub(crate) async fn spawn_on_endpoint_with_admission_owned(
         endpoint: Endpoint,
@@ -307,6 +324,7 @@ impl MemberMesh {
         metadata: MemberMetadata,
         admission: Arc<dyn AdmissionPolicy>,
         bootstrap: Vec<EndpointAddr>,
+        discovery: Option<DiscoveryConfig>,
         owns_endpoint: bool,
         #[cfg(feature = "otel")] meter: Option<opentelemetry::metrics::Meter>,
     ) -> Result<Self, MemberMeshError> {
@@ -326,6 +344,7 @@ impl MemberMesh {
             metadata,
             admission,
             bootstrap,
+            discovery,
             client,
             internal_tx,
             internal_rx,

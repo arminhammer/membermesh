@@ -7,7 +7,10 @@ use iroh::{
 use iroh_gossip::TopicId;
 use membermesh_core::{MemberMetadata, ProtocolConfig};
 
-use crate::{AdmissionPolicy, MemberMesh, MemberMeshError, OpenAdmission, error::ExternalError};
+use crate::{
+    AdmissionPolicy, DiscoveryConfig, MemberMesh, MemberMeshError, OpenAdmission,
+    error::ExternalError,
+};
 
 /// Builder for spawning a standalone [`MemberMesh`] with its own `iroh` [`Endpoint`] and `Router`.
 #[derive(Debug)]
@@ -18,6 +21,7 @@ pub struct MemberMeshBuilder {
     metadata: MemberMetadata,
     admission: Arc<dyn AdmissionPolicy>,
     bootstrap: Vec<EndpointAddr>,
+    discovery: Option<DiscoveryConfig>,
     relay_mode: RelayMode,
     #[cfg(feature = "otel")]
     meter: Option<opentelemetry::metrics::Meter>,
@@ -34,6 +38,7 @@ impl MemberMeshBuilder {
             metadata: MemberMetadata::default(),
             admission: Arc::new(OpenAdmission),
             bootstrap: Vec::new(),
+            discovery: None,
             relay_mode: RelayMode::Default,
             #[cfg(feature = "otel")]
             meter: None,
@@ -72,6 +77,20 @@ impl MemberMeshBuilder {
     #[must_use]
     pub fn bootstrap(mut self, peers: impl IntoIterator<Item = EndpointAddr>) -> Self {
         self.bootstrap.extend(peers);
+        self
+    }
+
+    /// Enables or disables default LAN multicast peer auto-discovery (`DiscoveryConfig::lan()`).
+    #[must_use]
+    pub fn auto_discovery(mut self, enabled: bool) -> Self {
+        self.discovery = enabled.then(DiscoveryConfig::lan);
+        self
+    }
+
+    /// Configures optional UDP multicast LAN peer auto-discovery using `config`.
+    #[must_use]
+    pub fn discovery(mut self, config: DiscoveryConfig) -> Self {
+        self.discovery = Some(config);
         self
     }
 
@@ -119,6 +138,7 @@ impl MemberMeshBuilder {
             self.metadata,
             self.admission,
             self.bootstrap,
+            self.discovery,
             true,
             #[cfg(feature = "otel")]
             self.meter,

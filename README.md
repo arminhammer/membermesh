@@ -39,6 +39,7 @@ let admission = Arc::new(SharedSecretAdmission::from_passphrase("cluster-secret"
 
 let node = MemberMesh::builder(topic)
     .admission(admission)
+    .auto_discovery(true) // Optional UDP multicast LAN peer discovery
     .spawn()
     .await?;
 
@@ -84,6 +85,8 @@ let mesh = prepared.start(vec![]).await?;
 
 ## CLI Demo (2-Terminal Cluster)
 
+### Option 1: Explicit Ticket Bootstrap (Default)
+
 Terminal 1 (founder):
 
 ```bash
@@ -94,6 +97,14 @@ Copy the printed `--bootstrap <HEX_TICKET>` into Terminal 2:
 
 ```bash
 cargo run -p membermesh-cli -- start --topic demo --no-relay --bootstrap <HEX_TICKET>
+```
+
+### Option 2: Optional LAN Auto-Discovery (Zero-Ticket)
+
+Pass `--auto-discover` in both terminals on the same local network (can also be combined with `--bootstrap <HEX_TICKET>`):
+
+```bash
+cargo run -p membermesh-cli -- start --topic demo --no-relay --auto-discover
 ```
 
 Use `--secret <passphrase>` on both nodes to enforce `SharedSecretAdmission`, or omit `--no-relay` for cross-NAT peers over `iroh` relays. Press `Ctrl+C` on the leader to observe deterministic leadership handoff.

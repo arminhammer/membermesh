@@ -1,20 +1,23 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use iroh::{Endpoint, EndpointAddr, address_lookup::memory::MemoryLookup};
+use iroh::{Endpoint, EndpointAddr, EndpointId, address_lookup::memory::MemoryLookup};
 use iroh_gossip::{Gossip, TopicId};
 use membermesh_core::{
-    ControlMessage, Engine, EngineAction, EngineInput, LocalNodeInit, MemberMetadata, MemberView,
-    MembershipEvent, PeerAge, PeerId, ProtocolConfig, SessionId, SimInstant, SyncSnapshot,
+    ControlMessage, Engine, EngineAction, EngineInput, LocalNodeInit, MemberMetadata, MemberStatus,
+    MemberView, MembershipEvent, PeerAge, PeerId, ProtocolConfig, SessionId, SimInstant,
+    SyncSnapshot,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{Instrument as _, debug, debug_span, info_span};
 
 use crate::{
-    AdmissionPolicy, EventStream, IrohSigner, IrohVerifier, MemberMeshError,
+    AdmissionPolicy, DiscoveryConfig, EventStream, IrohSigner, IrohVerifier, MemberMeshError,
     admission::CorePolicyAdapter,
+    discovery::spawn_discovery_task,
     gossip::{GossipBridge, GossipBridgeEvent, encode_addr_hint, register_addr_hint},
     signer::{endpoint_id_from_peer, peer_id_from_endpoint},
     sync::{ControlClient, ControlFuture, ControlHandler, ControlProtocol},
@@ -49,6 +52,7 @@ pub(crate) enum ActorCommand {
 #[derive(Debug)]
 pub(crate) enum InternalMsg {
     Gossip(GossipBridgeEvent),
+    DiscoveredPeer(EndpointAddr),
     ControlInbound {
         from: PeerId,
         msg: ControlMessage,
@@ -236,7 +240,7 @@ pub(crate) fn build_control_wiring(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "internal actor constructor wiring endpoint, gossip, signer, telemetry, and control channels"
+    reason = "internal actor constructor wiring endpoint, gossip, signer, discovery, telemetry, and control channels"
 )]
 pub(crate) async fn spawn_actor(
     endpoint: Endpoint,
@@ -246,6 +250,7 @@ pub(crate) async fn spawn_actor(
     metadata: MemberMetadata,
     admission: Arc<dyn AdmissionPolicy>,
     bootstrap: Vec<EndpointAddr>,
+    discovery: Option<DiscoveryConfig>,
     client: ControlClient,
     internal_tx: mpsc::UnboundedSender<InternalMsg>,
     internal_rx: mpsc::UnboundedReceiver<InternalMsg>,
@@ -326,6 +331,14 @@ pub(crate) async fn spawn_actor(
         let (cmd_tx, cmd_rx) = mpsc::channel(128);
         let (events_tx, _) = tokio::sync::broadcast::channel(256);
 
+        let discovery_cooldown = discovery.as_ref().map_or(Duration::from_secs(2), |cfg| {
+            cfg.beacon_interval()
+                .clamp(Duration::from_millis(200), Duration::from_secs(2))
+        });
+        let discovery_task = discovery.and_then(|cfg| {
+            spawn_discovery_task(endpoint.clone(), topic_id, &cfg, internal_tx.clone())
+        });
+
         let ctx = ActorLoopCtx {
             local_peer,
             start_instant,
@@ -340,8 +353,10 @@ pub(crate) async fn spawn_actor(
             cmd_rx,
             rpc_sem: Arc::new(Semaphore::new(MAX_INFLIGHT_RPCS)),
             metrics,
+            discovery_attempts: HashMap::new(),
+            discovery_cooldown,
         };
-        let task = tokio::spawn(run_actor_loop(ctx, gossip_forwarder));
+        let task = tokio::spawn(run_actor_loop(ctx, gossip_forwarder, discovery_task));
 
         Ok(SpawnedActor {
             handle: MeshActorHandle { cmd_tx, events_tx },
@@ -367,10 +382,17 @@ struct ActorLoopCtx {
     cmd_rx: mpsc::Receiver<ActorCommand>,
     rpc_sem: Arc<Semaphore>,
     metrics: MeshMetrics,
+    discovery_attempts: HashMap<EndpointId, (EndpointAddr, tokio::time::Instant)>,
+    discovery_cooldown: Duration,
 }
 
-async fn run_actor_loop(mut ctx: ActorLoopCtx, gossip_forwarder: tokio::task::JoinHandle<()>) {
+async fn run_actor_loop(
+    mut ctx: ActorLoopCtx,
+    gossip_forwarder: tokio::task::JoinHandle<()>,
+    discovery_task: Option<tokio::task::JoinHandle<()>>,
+) {
     let _forwarder_guard = AbortHandleGuard(gossip_forwarder);
+    let _discovery_guard = discovery_task.map(AbortHandleGuard);
     let mut next_wakeup = ctx.engine.next_wakeup();
 
     let init_actions = std::mem::take(&mut ctx.init_actions);
@@ -461,6 +483,41 @@ async fn handle_internal_msg(
         InternalMsg::Gossip(GossipBridgeEvent::Lagged) => {
             ctx.metrics.record_gossip_received("lagged");
             ctx.engine.handle_input(now, EngineInput::GossipLagged)
+        }
+        InternalMsg::DiscoveredPeer(addr) => {
+            let discovered_peer = peer_id_from_endpoint(addr.id);
+            if discovered_peer == ctx.local_peer {
+                return;
+            }
+            ctx.lookup.add_endpoint_info(addr.clone());
+            let already_alive = ctx
+                .engine
+                .members_ordered()
+                .iter()
+                .any(|m| m.peer_id == discovered_peer && m.status == MemberStatus::Alive);
+            if let Some((prev_addr, prev_at)) = ctx.discovery_attempts.get(&addr.id)
+                && *prev_addr == addr
+                && (already_alive || prev_at.elapsed() < ctx.discovery_cooldown)
+            {
+                return;
+            }
+            ctx.discovery_attempts
+                .insert(addr.id, (addr.clone(), tokio::time::Instant::now()));
+            if let Err(err) = ctx.bridge.join_peers(vec![addr.id]).await {
+                debug!(
+                    "auto-discovery gossip join skipped for {}: {err}",
+                    addr.id.fmt_short()
+                );
+            }
+            let snap = ctx.engine.table().snapshot();
+            spawn_sync_rpc(
+                discovered_peer,
+                snap,
+                ctx.client.clone(),
+                ctx.internal_tx.clone(),
+                Arc::clone(&ctx.rpc_sem),
+            );
+            Vec::new()
         }
         InternalMsg::ControlInbound {
             from,
