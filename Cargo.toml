@@ -61,9 +61,10 @@ postcard = { version = "1.1", features = ["alloc", "use-std"] }
 proptest = "1.12"
 rand = { version = "0.10", features = ["chacha"] }
 serde = { version = "1.0", features = ["derive"] }
+socket2 = "0.6"
 stateright = "0.31"
 thiserror = "2.0"
-tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
+tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

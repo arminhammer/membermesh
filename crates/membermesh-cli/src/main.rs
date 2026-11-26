@@ -3,11 +3,12 @@
 use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use iroh::{EndpointAddr, RelayMode};
 use iroh_gossip::TopicId;
 use membermesh::{
-    AdmissionPolicy, MemberMesh, OpenAdmission, SharedSecretAdmission, peer_id_from_endpoint,
+    AdmissionPolicy, DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_ADDR, MemberMesh, OpenAdmission,
+    SharedSecretAdmission, peer_id_from_endpoint,
 };
 use membermesh_core::{MemberMetadata, MemberView, PeerId, ProtocolConfig};
 use tokio::time::MissedTickBehavior;
@@ -27,31 +28,38 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Start a membermesh node and join a cluster topic.
-    Start {
-        /// Human-readable cluster topic name (hashed with BLAKE3 into a `TopicId`).
-        #[arg(long)]
-        topic: String,
+    Start(StartArgs),
+}
 
-        /// Hex-encoded bootstrap `EndpointAddr` ticket printed by an existing node (repeatable).
-        #[arg(long = "bootstrap")]
-        bootstrap: Vec<String>,
+#[derive(Debug, Args)]
+struct StartArgs {
+    /// Human-readable cluster topic name (hashed with BLAKE3 into a `TopicId`).
+    #[arg(long)]
+    topic: String,
 
-        /// Timing profile controlling SWIM probes and Lifeguard suspicion bounds.
-        #[arg(long, value_enum, default_value_t = Profile::Lan)]
-        profile: Profile,
+    /// Hex-encoded bootstrap `EndpointAddr` ticket printed by an existing node (repeatable).
+    #[arg(long = "bootstrap")]
+    bootstrap: Vec<String>,
 
-        /// Optional shared passphrase enabling keyed BLAKE3 cluster admission.
-        #[arg(long)]
-        secret: Option<String>,
+    /// Enable automatic LAN peer discovery via UDP multicast (can be combined with --bootstrap).
+    #[arg(long = "auto-discover")]
+    auto_discover: bool,
 
-        /// Optional short UTF-8 metadata label (max 512 bytes) attached to this node's claims.
-        #[arg(long)]
-        metadata: Option<String>,
+    /// Timing profile controlling SWIM probes and Lifeguard suspicion bounds.
+    #[arg(long, value_enum, default_value_t = Profile::Lan)]
+    profile: Profile,
 
-        /// Disable iroh relay servers (useful for pure LAN or offline loopback demos).
-        #[arg(long)]
-        no_relay: bool,
-    },
+    /// Optional shared passphrase enabling keyed BLAKE3 cluster admission.
+    #[arg(long)]
+    secret: Option<String>,
+
+    /// Optional short UTF-8 metadata label (max 512 bytes) attached to this node's claims.
+    #[arg(long)]
+    metadata: Option<String>,
+
+    /// Disable iroh relay servers (useful for pure LAN or offline loopback demos).
+    #[arg(long)]
+    no_relay: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -76,14 +84,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
-        Command::Start {
-            topic,
-            bootstrap,
-            profile,
-            secret,
-            metadata,
-            no_relay,
-        } => run_start(topic, bootstrap, profile, secret, metadata, no_relay).await,
+        Command::Start(args) => run_start(args).await,
     }
 }
 
@@ -95,39 +96,33 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn run_start(
-    topic_name: String,
-    bootstrap_tickets: Vec<String>,
-    profile: Profile,
-    secret: Option<String>,
-    metadata_str: Option<String>,
-    no_relay: bool,
-) -> Result<()> {
-    let topic_id = TopicId::from_bytes(*blake3::hash(topic_name.as_bytes()).as_bytes());
-    let mut bootstrap = Vec::with_capacity(bootstrap_tickets.len());
-    for raw in &bootstrap_tickets {
+async fn run_start(args: StartArgs) -> Result<()> {
+    let topic_id = TopicId::from_bytes(*blake3::hash(args.topic.as_bytes()).as_bytes());
+    let mut bootstrap = Vec::with_capacity(args.bootstrap.len());
+    for raw in &args.bootstrap {
         bootstrap.push(decode_ticket(raw).context("invalid --bootstrap ticket")?);
     }
 
-    let metadata = match metadata_str {
+    let metadata = match args.metadata {
         Some(text) => MemberMetadata::try_new(text.into_bytes())?,
         None => MemberMetadata::default(),
     };
-    let admission: Arc<dyn AdmissionPolicy> = match secret {
+    let admission: Arc<dyn AdmissionPolicy> = match args.secret {
         Some(pass) => Arc::new(SharedSecretAdmission::from_passphrase(&pass)),
         None => Arc::new(OpenAdmission),
     };
-    let relay_mode = if no_relay {
+    let relay_mode = if args.no_relay {
         RelayMode::Disabled
     } else {
         RelayMode::Default
     };
 
     let mesh = MemberMesh::builder(topic_id)
-        .config(profile.into())
+        .config(args.profile.into())
         .metadata(metadata)
         .admission(admission)
         .bootstrap(bootstrap)
+        .auto_discovery(args.auto_discover)
         .relay_mode(relay_mode)
         .spawn()
         .await
@@ -138,6 +133,13 @@ async fn run_start(
     println!("Node ID:   {}", mesh.id());
     println!("Topic ID:  {topic_id:?}");
     println!("Bootstrap: --bootstrap {ticket}");
+    if args.auto_discover {
+        println!(
+            "Discovery: enabled (UDP multicast {DEFAULT_MULTICAST_ADDR}:{DEFAULT_DISCOVERY_PORT})"
+        );
+    } else {
+        println!("Discovery: disabled (pass --auto-discover to enable LAN multicast)");
+    }
     println!("Press Ctrl+C to gracefully leave...\n");
 
     let mut events = mesh.subscribe();
@@ -285,5 +287,47 @@ mod tests {
         assert!(decode_ticket("abc").is_err());
         assert!(decode_ticket("zzzz").is_err());
         assert!(decode_ticket("deadbeef").is_err());
+    }
+
+    #[test]
+    fn cli_accepts_auto_discover_and_bootstrap_flags() {
+        let auto_only = Cli::try_parse_from([
+            "membermesh-cli",
+            "start",
+            "--topic",
+            "demo",
+            "--auto-discover",
+        ])
+        .expect("parse --auto-discover");
+        let Command::Start(args) = auto_only.command;
+        assert!(args.auto_discover);
+        assert_eq!(args.bootstrap, Vec::<String>::new());
+
+        let ticket_only = Cli::try_parse_from([
+            "membermesh-cli",
+            "start",
+            "--topic",
+            "demo",
+            "--bootstrap",
+            "deadbeef",
+        ])
+        .expect("parse --bootstrap");
+        let Command::Start(args) = ticket_only.command;
+        assert!(!args.auto_discover);
+        assert_eq!(args.bootstrap, vec!["deadbeef"]);
+
+        let both = Cli::try_parse_from([
+            "membermesh-cli",
+            "start",
+            "--topic",
+            "demo",
+            "--bootstrap",
+            "deadbeef",
+            "--auto-discover",
+        ])
+        .expect("parse combined flags");
+        let Command::Start(args) = both.command;
+        assert!(args.auto_discover);
+        assert_eq!(args.bootstrap, vec!["deadbeef"]);
     }
 }

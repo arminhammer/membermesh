@@ -1,5 +1,6 @@
 mod api;
 mod cluster;
+mod discovery;
 mod soak;
 mod sync;
 mod telemetry;
@@ -34,6 +35,7 @@ pub struct MeshWorld {
     pub otel_metric_provider: Option<SdkMeterProvider>,
     pub otel_metric_exporter: Option<InMemoryMetricExporter>,
     pub captured_span_names: BTreeSet<String>,
+    pub discovery_port: u16,
 }
 
 impl std::fmt::Debug for MeshWorld {
