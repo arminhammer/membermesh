@@ -9,6 +9,8 @@ pub mod crypto;
 pub mod gossip_cosim;
 /// Deterministic virtual-clock network simulator for `membermesh_core::Engine`.
 pub mod sim;
+/// Live cluster trace recorder and formal invariant checker.
+pub mod trace;
 
 use std::{fmt, future::Future, time::Duration};
 

@@ -13,7 +13,10 @@ workspace = true
 [dependencies]
 bytes.workspace = true
 iroh.workspace = true
+iroh-gossip.workspace = true
 membermesh-core.workspace = true
+n0-future.workspace = true
+postcard.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

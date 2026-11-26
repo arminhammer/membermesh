@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId,
@@ -28,10 +33,25 @@ pub trait ControlHandler: Send + Sync + std::fmt::Debug + 'static {
     fn handle(&self, from: PeerId, msg: ControlMessage) -> ControlFuture;
 }
 
+#[derive(Clone, Debug)]
+enum HandlerSlot {
+    Bound(Arc<dyn ControlHandler>),
+    Deferred(Arc<OnceLock<Arc<dyn ControlHandler>>>),
+}
+
+impl HandlerSlot {
+    fn get(&self) -> Option<&Arc<dyn ControlHandler>> {
+        match self {
+            Self::Bound(h) => Some(h),
+            Self::Deferred(cell) => cell.get(),
+        }
+    }
+}
+
 /// [`iroh::protocol::ProtocolHandler`] serving `/membermesh/1` direct SWIM probes and Push/Pull sync.
 #[derive(Clone, Debug)]
 pub struct ControlProtocol {
-    handler: Arc<dyn ControlHandler>,
+    handler: HandlerSlot,
     max_control_bytes: usize,
 }
 
@@ -40,9 +60,18 @@ impl ControlProtocol {
     #[must_use]
     pub fn new(handler: Arc<dyn ControlHandler>) -> Self {
         Self {
-            handler,
+            handler: HandlerSlot::Bound(handler),
             max_control_bytes: DEFAULT_MAX_CONTROL_BYTES,
         }
+    }
+
+    pub(crate) fn deferred() -> (Self, Arc<OnceLock<Arc<dyn ControlHandler>>>) {
+        let cell = Arc::new(OnceLock::new());
+        let proto = Self {
+            handler: HandlerSlot::Deferred(Arc::clone(&cell)),
+            max_control_bytes: DEFAULT_MAX_CONTROL_BYTES,
+        };
+        (proto, cell)
     }
 
     /// Overrides the maximum accepted control/sync frame size in bytes.
@@ -54,6 +83,9 @@ impl ControlProtocol {
 
     /// Reads one length-prefixed frame, dispatches to `handler`, and writes any reply frame.
     async fn serve_connection(&self, conn: Connection) -> Result<(), MemberMeshError> {
+        let Some(handler) = self.handler.get() else {
+            return Err(MemberMeshError::Closed);
+        };
         let from = peer_id_from_endpoint(conn.remote_id());
         let (mut send, mut recv) = conn
             .accept_bi()
@@ -62,7 +94,7 @@ impl ControlProtocol {
 
         let frame = read_bounded_frame(&mut recv, self.max_control_bytes).await?;
         let msg = decode_control(&frame, self.max_control_bytes)?;
-        if let Some(reply) = self.handler.handle(from, msg).await {
+        if let Some(reply) = handler.handle(from, msg).await {
             let encoded = encode_control(&reply, self.max_control_bytes)?;
             write_bounded_frame(&mut send, &encoded).await?;
         }
