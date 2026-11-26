@@ -15,11 +15,15 @@ bytes.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 cucumber.workspace = true
 membermesh-testkit.workspace = true
 proptest.workspace = true
+serde.workspace = true
+stateright.workspace = true
 tokio.workspace = true
 
 [[test]]

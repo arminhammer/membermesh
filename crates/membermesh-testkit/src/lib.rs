@@ -3,6 +3,10 @@
 
 /// Deterministic Ed25519 signers and verifiers for tests.
 pub mod crypto;
+/// Co-simulator running `membermesh_core::Engine` over `iroh_gossip::proto::State`.
+pub mod gossip_cosim;
+/// Deterministic virtual-clock network simulator for `membermesh_core::Engine`.
+pub mod sim;
 
 use std::{fmt, future::Future, time::Duration};
 
