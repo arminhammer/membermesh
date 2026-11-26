@@ -54,5 +54,6 @@ membermesh-testkit = { path = "crates/membermesh-testkit", version = "0.1.0" }
 postcard = { version = "1.1", features = ["alloc", "use-std"] }
 proptest = "1.12"
 serde = { version = "1.0", features = ["derive"] }
+stateright = "0.31"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
